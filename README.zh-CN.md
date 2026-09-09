@@ -39,7 +39,24 @@ Codex task ──Responses + SSE──▶ codex-chatgpt-web ──embedded brows
 
 Codex 会保留原生任务、上下文生命周期、界面和工具 harness。本地 Responses 桥接程序只会将
 所选模型的任务转发到与该任务绑定的 ChatGPT 临时聊天；在完整模式下，MCP 会把 ChatGPT 连接回
-同一个 Codex 任务的工具，直到下一次上下文压缩边界。
+同一个 Codex 任务的工具。Pro 保留 ChatGPT 会话，不使用 Codex 上下文压缩；其他 effort 保持原有的上下文生命周期。
+
+## Pro 会话保留版本
+
+此定制版本（`5.0.7-pro-context.1`）让自动 Pro 和 Zero Risk Pro 在每个原生 Codex 轮次中只发送一条
+新的用户消息。第一条消息包含任务的初始指令，后续消息只包含新输入。所有本地工具／MCP 调用都在
+该轮次的同一个 ChatGPT 助手响应内完成。Pro 禁用 Codex 历史重放、上下文重建、压缩、自动恢复、
+分段传输及暂存消息；即使启用 Bigger Context 也不例外。
+
+安装后重启 Launcher 和 Codex，并开始新的 Codex 任务。请保持任务的 ChatGPT 标签页打开。
+会话或正在进行的响应丢失时会明确报错，无法从 Codex 历史中恢复。新消息超出浏览器限制时，请缩短输入。
+现有 Launcher 会在空闲 30 分钟后关闭保留的标签页，达到五个标签页的容量上限时也可能将其释放。
+这两种情况都会终止 Pro 会话的连续性。
+请移除生效的 `model_context_window` 和 `model_auto_compact_token_limit` 覆盖设置：Codex 在读取模型
+元数据之后应用这些设置，因此它们可能重新启用自动压缩。无论配置如何，Pro 的压缩请求都会被拒绝。
+其他模型仍可使用原有的上下文管理，但不会再用 Pro 代发过大的暂存消息。
+
+实现、比较实验和限制见[架构决策记录](docs/adr/0001-pro-context.md)。
 
 > [!TIP]
 > 我还开发了 **[ChatGPT Persona Voice](https://github.com/miuuyy/ChatGPT-Persona-Voice)**：一款
@@ -52,7 +69,7 @@ Codex 会保留原生任务、上下文生命周期、界面和工具 harness。
   上下文生命周期、流式输出、追踪和工具展示。
 - **通过 MCP 使用完整 Codex harness。** 完整模式支持登录账户公开的全部 effort（包括 Pro），
   并可访问当前任务的文件系统、shell、图片、审批以及已配置的工具和应用。
-- **连续任务会话与原生上下文压缩。** 连续消息会复用同一个与任务绑定的临时聊天。到达上下文
+- **连续任务会话与原生上下文压缩。** 连续消息会复用同一个与任务绑定的临时聊天。对于非 Pro 模型，到达上下文
   边界时，保留的 agent 会先写出检查点，再由 Codex 从干净聊天继续；若该私有聊天已被关闭，
   则使用 Codex 的规范任务历史作为回退来源。
 - **统一的跨平台启动器。** macOS、Windows 和 Linux 应用统一管理登录、模型设置、MCP 指南、
@@ -128,7 +145,8 @@ bun run app
 > 有关 **GPT-5.6 Sol Pro** 和 **GPT-6 Astra** 当前的 ChatGPT 消息额度，请参阅
 > [Limits](https://github.com/miuuyy/codex-chatgpt-web/discussions/309)。Token 上下文上限取决于
 > 账户类型和所选 effort。Plus 的 Medium/High 使用实测的 90,000-token 窗口；启用实验性的
-> **3× context** 后最高为 270,000 tokens，并且全程支持原生 Codex compaction。
+> **3× context** 后最高为 270,000 tokens，非 Pro 模型支持原生 Codex compaction。
+> 此版本的 Pro 不使用分段传输或 Codex compaction。
 
 1. 完成启动器中的必需设置。
 2. 在启动器中打开 **MCP**。请在将使用 ChatGPT 连接器的同一个 OpenAI 账户中创建 Tunnel

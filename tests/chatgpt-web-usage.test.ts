@@ -41,7 +41,8 @@ test("multipart selection accounts for whole-record and composer fit before subm
         .toEqual([...contents]);
     }
   }
-}, 30_000);
+  // Full-size record and whitespace fixtures exercise correctness, not host tokenizer throughput.
+}, 90_000);
 
 test("Bigger Context compaction selects three parts before the legacy inline byte budget", () => {
   const parsed = request("x".repeat(160_000));

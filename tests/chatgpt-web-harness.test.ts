@@ -1527,9 +1527,14 @@ describe("ChatGPT outer-native harness v4", () => {
     expect(files[0]!.mimeType).toBe("image/png");
   });
 
-  test("keeps browser-only Pro context complete without creating a local-tool capability", () => {
+  test("browser-only Pro never reconstructs prior local evidence or creates a local-tool capability", () => {
     const imageUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAE0lEQVR4nGP4z8DwHwwZGP6DAQBJyAn3FGMynQAAAABJRU5ErkJggg==";
     const request = proRequest();
+    const nativeInput = (request._rawBody as { input: Array<Record<string, unknown>> }).input;
+    nativeInput.at(-1)!.content = [
+      { type: "input_text", text: "Synthesize the prepared evidence" },
+      { type: "input_image", image_url: imageUrl, detail: "high" },
+    ];
     request.context.systemPrompt = ["system-rule", "repo-rule"];
     request.context.messages = [
       {
@@ -1553,8 +1558,8 @@ describe("ChatGPT outer-native harness v4", () => {
     const compiled = compileChatGptWebPrompt(request, browserOnlyCapabilities);
     expect(compiled.text).toContain("ChatGPT Web Pro with no Codex Native bridge to the user's local computer");
     expect(compiled.text).toContain("web search, browsing, research");
-    expect(compiled.text).toContain("prepared workspace evidence");
-    expect(compiled.text).toContain('"system":["system-rule","repo-rule"]');
+    expect(compiled.text).not.toContain("prepared workspace evidence");
+    expect(compiled.text).toContain('"system":[]');
     expect(compiled.text).toContain('"attachment_ref":"codex-input-image-1"');
     expect(compiled.images).toHaveLength(1);
     expect(compiled.text).not.toContain("codex_bind_turn");
@@ -1562,17 +1567,17 @@ describe("ChatGPT outer-native harness v4", () => {
     expect(compiled.text).not.toContain("Use the attached Codex Native plugin");
     expect(() => compileChatGptWebPrompt(request, browserOnlyCapabilities, "turn_forbidden")).toThrow("must not receive");
 
-    expect(chatGptReadOnlyContextWarning(request, browserOnlyCapabilities)).toContain("complete accumulated task context");
+    expect(chatGptReadOnlyContextWarning(request, browserOnlyCapabilities)).toContain("retained ChatGPT conversation");
     expect(chatGptReadOnlyContextWarning(request, browserOnlyCapabilities)).toContain("web search remain available");
     expect(chatGptReadOnlyContextWarning(request, browserOnlyCapabilities)).not.toContain("tools/MCP");
     request.context.messages = [{ role: "user", content: "No preparation yet", timestamp: 3 }];
-    expect(chatGptReadOnlyContextWarning(request, browserOnlyCapabilities)).toContain("does not contain local tool results yet");
+    expect(chatGptReadOnlyContextWarning(request, browserOnlyCapabilities)).toContain("receives only the new message");
     request.context.messages = [{
       role: "user",
       content: `${SUMMARY_PREFIX}\n\nWorkspace files and tests were inspected before compaction.`,
       timestamp: 4,
     }];
-    expect(chatGptReadOnlyContextWarning(request, browserOnlyCapabilities)).toContain("compaction summary");
+    expect(chatGptReadOnlyContextWarning(request, browserOnlyCapabilities)).toContain("No Codex history or compaction summary is replayed");
     expect(chatGptReadOnlyContextWarning(parsed(), toolCapabilities)).toBeUndefined();
     expect(() => compileChatGptWebPrompt(parsed(), toolCapabilities)).toThrow("requires a broker turn token");
   });
@@ -2464,7 +2469,8 @@ describe("ChatGPT outer-native harness v4", () => {
       adapter: "chatgpt-web",
       baseUrl: "browser://chatgpt-pro-test",
       contextWindow: 256_000,
-      chatgptWeb: { brokerSocketPath: socketPath, turnTimeoutMs: 30_000, localToolsEnabled: true, solAvailable: true, proAvailable: true },
+      chatgptWeb: { browserHost: "launcher", browserHostDescriptorPath: join(tempRoot, "pro-loop", "launcher.json"),
+        brokerSocketPath: socketPath, turnTimeoutMs: 30_000, localToolsEnabled: true, solAvailable: true, proAvailable: true },
     };
     const worker = ChatGptBrowserWorker.forProvider(provider);
     const originalRun = worker.run.bind(worker);

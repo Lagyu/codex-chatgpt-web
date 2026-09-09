@@ -40,7 +40,28 @@ Codex task ──Responses + SSE──▶ codex-chatgpt-web ──embedded brows
 
 Codex keeps the native task, context lifecycle, UI, and tool harness. The local Responses bridge
 routes only the selected model task through a task-bound ChatGPT Temporary Chat; in full mode, MCP
-connects ChatGPT back to the tools of that same Codex task until its next compaction boundary.
+connects ChatGPT back to the tools of that same Codex task. Pro retains its ChatGPT conversation
+without Codex compaction; other efforts retain their existing context lifecycle.
+
+## Pro retained-context build
+
+This custom build (`5.0.7-pro-context.1`) sends one new user message per native Codex turn for
+automatic Pro and Zero Risk Pro. The first message includes the task's initial instructions;
+later messages contain only the new input. All local-tool/MCP rounds stay inside that turn's
+single ChatGPT assistant response. Codex history replay, reconstruction, compaction, automatic
+recovery, multipart transport, and staging are disabled for Pro, including with Bigger Context on.
+
+Start a new Codex task after installing and restarting the Launcher and Codex. Keep the task's
+ChatGPT tab open. A missing chat or lost in-flight response produces an explicit error; it cannot
+be recovered from the Codex transcript. Shorten a new message that exceeds the browser limit.
+The existing launcher expires retained tabs after 30 idle minutes and may evict them at its
+five-tab capacity; either event also ends Pro continuity.
+Unset active `model_context_window` and `model_auto_compact_token_limit` overrides: Codex applies
+these after model metadata and they can re-enable its scheduler. Pro compaction requests are
+rejected regardless. Non-Pro context management remains available, but its staging messages can
+no longer select Pro as a fallback for oversized payloads.
+
+See the [decision record](docs/adr/0001-pro-context.md) for implementation, experiments, and limits.
 
 > [!TIP]
 > I also built **[ChatGPT Persona Voice](https://github.com/miuuyy/ChatGPT-Persona-Voice)**, a local
@@ -55,7 +76,7 @@ connects ChatGPT back to the tools of that same Codex task until its next compac
 - **The full Codex harness over MCP.** Full mode gives every effort exposed by the signed-in account,
   including Pro, the active task's filesystem, shell, images, approvals, and configured tools/apps.
 - **Continuous task sessions and native compaction.** Sequential messages reuse one task-bound
-  Temporary Chat. At the context boundary, the retained agent writes the checkpoint before Codex
+  Temporary Chat. For non-Pro models, at the context boundary the retained agent writes a checkpoint before Codex
   starts a clean chat; if that chat was closed, canonical Codex history supplies the fallback.
 - **One cross-platform launcher.** The macOS, Windows, and Linux app owns sign-in, model setup, MCP
   guidance, health checks, safe diagnostics, and up to five visible task-bound browser tabs.
@@ -145,7 +166,7 @@ The launcher's **MCP** page guides the complete setup. For the exact clicks, see
 > ChatGPT message allowances for **GPT-5.6 Sol Pro** and **GPT-6 Astra**. Context limits depend on
 > the account type and selected effort. Plus Medium/High uses a measured 90,000-token window, or
 > up to 270,000 tokens with experimental **3× context** enabled, with native Codex compaction
-> supported throughout.
+> supported for non-Pro models. Pro never uses multipart delivery or Codex compaction in this build.
 
 1. Finish the required setup, open **MCP**, create the Tunnel and regular API key, then press
    **Connect harness**.

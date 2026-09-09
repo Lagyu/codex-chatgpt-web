@@ -6,6 +6,14 @@ export const CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL = "chatgpt-web-zero-risk";
 /** Internal adapter identity for the explicitly enabled, Pro-sized Zero Risk context profile. */
 export const CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL = "chatgpt-web-zero-risk-pro";
 
+/** Selected Pro models, independently of the account's subscription. See docs/adr/0001-pro-context.md. */
+export function isChatGptWebProModel(model: string, effort?: string): boolean {
+  return model === "chatgpt-web/pro"
+    || model === "chatgpt-web/zero-risk-pro"
+    || model === CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL
+    || (model === CHATGPT_WEB_BACKEND_MODEL && effort === "max");
+}
+
 export type ChatGptWebAutomaticBackendModel =
   | typeof CHATGPT_WEB_BACKEND_MODEL
   | typeof CHATGPT_WEB_LUNA_BACKEND_MODEL;
@@ -153,7 +161,7 @@ export function resolveChatGptWebContextLimits(
   } else {
     throw new Error(`ChatGPT Plus context limit is not defined for unavailable effort: ${effort}`);
   }
-  if (!capabilities.experimentalBiggerContext) return limits;
+  if (!capabilities.experimentalBiggerContext || isChatGptWebProModel(backendModel, effort)) return limits;
   return contextLimits(
     limits.contextWindow * CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER,
     limits.autoCompactTokenLimit * CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER,

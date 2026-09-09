@@ -8,6 +8,7 @@ import {
   CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE,
   CHATGPT_WEB_MODEL_ROUTES,
   resolveChatGptWebContextLimits,
+  isChatGptWebProModel,
 } from "../src/chatgpt-web-models";
 import { augmentNativeModelCatalog } from "../src/model-catalog";
 
@@ -64,6 +65,7 @@ describe("native /models augmentation", () => {
     for (const [index, model] of web.entries()) {
       const route = CHATGPT_WEB_MODEL_ROUTES[index]!;
       const limits = resolveChatGptWebContextLimits(route.backendModel, route.adapterEffort, config);
+      const pro = isChatGptWebProModel(route.backendModel, route.adapterEffort);
       expect(model).toMatchObject({
         slug: route.slug,
         display_name: route.displayName,
@@ -73,10 +75,10 @@ describe("native /models augmentation", () => {
         multi_agent_version: "v2",
         supported_in_api: true,
         priority: 2,
-        context_window: limits.contextWindow,
-        max_context_window: limits.contextWindow,
-        effective_context_window_percent: limits.effectiveContextWindowPercent,
-        auto_compact_token_limit: limits.autoCompactTokenLimit,
+        context_window: pro ? null : limits.contextWindow,
+        max_context_window: pro ? null : limits.contextWindow,
+        effective_context_window_percent: pro ? 100 : limits.effectiveContextWindowPercent,
+        auto_compact_token_limit: pro ? null : limits.autoCompactTokenLimit,
         additional_speed_tiers: [],
         service_tiers: [],
         default_service_tier: null,
@@ -91,8 +93,12 @@ describe("native /models augmentation", () => {
     config.experimentalBiggerContext = true;
     const models = augmentNativeModelCatalog(source(), config).models as Array<Record<string, unknown>>;
     const pro = models.find(model => model.slug === "chatgpt-web/pro")!;
-    expect(pro.context_window).toBe(336_579);
-    expect(pro.auto_compact_token_limit).toBe(285_000);
+    expect(pro.context_window).toBeNull();
+    expect(pro.max_context_window).toBeNull();
+    expect(pro.auto_compact_token_limit).toBeNull();
+    const high = CHATGPT_WEB_MODEL_ROUTES.find(route => route.adapterEffort === "high")!;
+    expect(models.find(model => model.slug === high.slug)!.context_window)
+      .toBe(resolveChatGptWebContextLimits(high.backendModel, high.adapterEffort, config).contextWindow);
   });
 
   test("keeps native Sol selectable in the bounded Compatibility V1 registry", () => {
@@ -228,8 +234,9 @@ describe("native /models augmentation", () => {
       slug: CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE.slug,
       display_name: CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE.displayName,
       input_modalities: ["text"],
-      context_window: 336_579,
-      auto_compact_token_limit: 285_000,
+      context_window: null,
+      max_context_window: null,
+      auto_compact_token_limit: null,
     });
   });
 

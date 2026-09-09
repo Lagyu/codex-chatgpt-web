@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isChatGptWebProModel } from "../../chatgpt-web-models";
 import type { AdapterEvent, CodexParsedRequest } from "../../types";
 import type { BrokerToolRequest } from "./turn-broker";
 import { chatGptBrowserTabClosedError, chatGptTurnSupersededError } from "./adapter-error";
@@ -187,6 +188,11 @@ function compactionInputRevision(parsed: CodexParsedRequest): unknown[] {
 export function chatGptTurnExecutionKey(parsed: CodexParsedRequest): string {
   const identity = extractChatGptTurnIdentity(parsed);
   if (!identity.turnId) throw new Error("ChatGPT web requires native Codex turn_id metadata for browser-session replay");
+  if (isChatGptWebProModel(parsed.modelId, parsed.options.reasoning)) {
+    // All Responses/MCP rounds belong to this one Web assistant response. A tool-result delta
+    // needs no reconstruction of the original prompt to find its live runtime.
+    return executionKey(parsed, { threadId: identity.threadId, turnId: identity.turnId, purpose: "pro-response" });
+  }
   return executionKey(parsed, {
     threadId: identity.threadId,
     turnId: identity.turnId,

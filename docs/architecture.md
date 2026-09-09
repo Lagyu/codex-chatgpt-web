@@ -1,5 +1,21 @@
 # Architecture
 
+## Pro policy in the custom retained-context build
+
+[ADR 0001](adr/0001-pro-context.md) governs automatic and manual Pro. Its existing Launcher lease
+and MCP runtime receive only the new native instruction per turn, with initial instructions only
+when bootstrapping a fresh task. All tool-result rounds address the same native thread/turn runtime.
+Pro bypasses Responses transcript storage, compaction handoffs, checkpoints, reconstruction,
+browser recovery, and Bigger Context staging. A required retained tab can never fall back to a new
+chat. Content-free persistent turn identities prevent resubmission after runtime loss.
+
+Pro catalog rows have no context window, maximum context window, or auto-compaction threshold.
+Physical browser message limits still apply. Explicit client config/profile/CLI overrides take
+precedence over catalog metadata and must be unset for Pro. The compaction, replay, and recovery
+paths described below continue to describe non-Pro models; they do not apply to Pro.
+
+Decision index: [ADRs](adr/README.md). The native stress experiment is `bun run smoke:pro`.
+
 ```text
 Codex app / CLI
       │ Responses API on loopback

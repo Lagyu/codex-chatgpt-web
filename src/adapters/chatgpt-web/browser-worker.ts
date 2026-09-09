@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { isChatGptWebProModel } from "../../chatgpt-web-models";
+import { PRO_COMPACTION_DISABLED, proContextError } from "./pro-context";
 import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright-core";
@@ -848,6 +850,14 @@ export function assertChatGptWebInputWithinLimits(
     effort,
     capabilities,
   );
+  if (isChatGptWebProModel(modelId, effort)) {
+    if (estimatedInputTokens >= contextWindow
+      || (browserMessageTokenLimit !== undefined && estimatedMessageTokens > browserMessageTokenLimit)
+      || (browserComposerCharLimit !== undefined && promptChars !== undefined && promptChars > browserComposerCharLimit)) {
+      throw proContextError("The new Pro message exceeds its single-message browser limit. Shorten the new input or remove attachments. Compaction and multipart staging are disabled.");
+    }
+    return;
+  }
   if (
     browserComposerCharLimit !== undefined
     && promptChars !== undefined
@@ -888,6 +898,10 @@ export function assertChatGptWebMultipartInputWithinLimits(
     finalImageTokens?: number;
   },
 ): void {
+  if (isChatGptWebProModel(modelId, effort)
+    || (transport && isChatGptWebProModel(modelId, transport.stagingEffort))) {
+    throw proContextError("Pro does not support multipart or staging messages.");
+  }
   if (modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
     throw new ChatGptWebAdapterError(
       "Bigger Context is unavailable for Luna because every later browser request includes the accumulated transcript inside the same 28,000-token transport budget.",
@@ -976,9 +990,8 @@ export function resolveChatGptWebMultipartStagingMode(
   if (modelId !== CHATGPT_WEB_MODEL_ID) {
     throw new Error(`ChatGPT Bigger Context staging mode is not defined for model: ${modelId}`);
   }
-  const efforts: readonly ChatGptWebModelMode["effort"][] = capabilities.proAvailable
-    ? ["low", "medium", "max"]
-    : ["low", "medium"];
+  // Pro is never a staging model, including for a transaction whose final effort is non-Pro.
+  const efforts: readonly ChatGptWebModelMode["effort"][] = ["low", "medium"];
   for (const effort of efforts) {
     const mode = resolveChatGptWebModelMode(modelId, effort, capabilities);
     const limits = resolveChatGptWebTransportLimits(modelId, effort, capabilities);
@@ -4172,6 +4185,9 @@ export class ChatGptBrowserWorker {
 
   private async runExclusive(turn: BrowserTurn): Promise<string> {
     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+    if (isChatGptWebProModel(turn.modelId, turn.reasoning) && turn.compaction) {
+      throw proContextError(PRO_COMPACTION_DISABLED);
+    }
     if (this.config.browserHost !== "launcher") return this.runBrowserTurn(turn);
 
     const lease = await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
@@ -4180,7 +4196,8 @@ export class ChatGptBrowserWorker {
       helperPid: process.pid,
       ...(turn.conversationKey ? { conversationKey: turn.conversationKey } : {}),
       ...((turn.conversationKey
-        && (turn.nativeConnector || turn.capabilities.localToolsEnabled || turn.requireRetainedConversation))
+        && (turn.nativeConnector || turn.capabilities.localToolsEnabled
+          || (turn.requireRetainedConversation && !isChatGptWebProModel(turn.modelId, turn.reasoning))))
         ? { connectorIdentity: this.config.appName }
         : {}),
       ...(turn.requireRetainedConversation ? { requireRetainedConversation: true } : {}),
@@ -4299,6 +4316,9 @@ export class ChatGptBrowserWorker {
     let diagnosticPage: Page | undefined;
     try {
       if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+      if (requestedMode.effort === "max" && prepared.multipart) {
+        throw proContextError("Pro does not support multipart or staging messages.");
+      }
       const multipartTransactionId = prepared.multipart
         ? `ctx_${randomUUID().replaceAll("-", "")}`
         : undefined;
@@ -4492,6 +4512,7 @@ export class ChatGptBrowserWorker {
       // Rebinding the exact leased page is a browser-ownership operation. Read-only
       // compaction needs it too; acquiring MCP tools is not a prerequisite.
       const launcherObservationRecovery = launcherSurfaceId !== undefined
+        && requestedMode.effort !== "max"
         && this.config.browserHostDescriptorPath !== undefined;
       await diagnostics.capture(page, "browser-page-acquired");
       console.info(
@@ -4631,7 +4652,7 @@ export class ChatGptBrowserWorker {
       }
 
       let submissionBaseline = await this.captureSubmissionBaseline(page);
-      let catalogRefreshAvailable = mode.localTools && !reuseConversation && !prepared.multipart;
+      let catalogRefreshAvailable = mode.localTools && mode.effort !== "max" && !reuseConversation && !prepared.multipart;
       const connectorAttemptBudget: ChatGptConnectorAttemptBudget = { triggerAttempts: 0 };
       for (;;) {
         try {

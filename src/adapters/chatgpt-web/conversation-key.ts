@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isChatGptWebProModel } from "../../chatgpt-web-models";
 import { SUMMARY_PREFIX } from "../../responses/compaction";
 import type { CodexParsedRequest } from "../../types";
 import { extractChatGptTurnIdentity } from "./environment";
@@ -38,7 +39,7 @@ export function chatGptConversationKey(
     threadId: identity.threadId,
     modelId: parsed.modelId,
     reasoning: parsed.options.reasoning,
-    compaction: compactionEpoch(raw?.input),
+    compaction: isChatGptWebProModel(parsed.modelId, parsed.options.reasoning) ? null : compactionEpoch(raw?.input),
   })).digest("hex");
 }
 

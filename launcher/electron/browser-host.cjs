@@ -27,7 +27,9 @@ const {
 const TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
 const CHATGPT_ORIGIN = "https://chatgpt.com";
 const IDLE_BROWSER_URL = "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3ECodex%20Web%20GPT%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E#codex-web-gpt-browser-host";
-const PRIMARY_VIEW_BOOTSTRAP_TIMEOUT_MS = 10_000;
+// Cold signed Electron renderers can start after the old ten-second deadline (ADR 0003).
+// This bounds one local document load; it does not retry or recover a ChatGPT conversation.
+const PRIMARY_VIEW_BOOTSTRAP_TIMEOUT_MS = 60_000;
 const MAX_BROWSER_VIEW_DIMENSION = 16_384;
 const MAX_BROWSER_TABS = 5;
 const MAX_CANCELLED_TURN_TRACES = 256;
@@ -1906,7 +1908,7 @@ class BrowserHost {
     this.clipboard.writeText(prompt);
   }
 
-  beginManualTurn(traceId, helperPid, prompt, conversationKey, resumePrompt, compaction = false) {
+  beginManualTurn(traceId, helperPid, prompt, conversationKey, resumePrompt, compaction = false, requireRetainedConversation = false) {
     if (this.manualOperation) {
       throw new Error(`ChatGPT browser is busy with ${this.manualOperation}`);
     }
@@ -1986,6 +1988,11 @@ class BrowserHost {
       throw new Error(`Manual ChatGPT conversation ${conversationKey} owns multiple browser tabs`);
     }
     let tab = retained[0];
+    if (!tab && requireRetainedConversation) {
+      const error = new Error("The retained Pro conversation is no longer available; recovery is disabled");
+      error.code = "retained_conversation_unavailable";
+      throw error;
+    }
     if (tab) {
       if (typeof resumePrompt !== "string" || !resumePrompt) {
         throw new Error("A retained Zero Risk conversation requires an incremental resume prompt");

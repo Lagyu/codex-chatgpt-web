@@ -2,6 +2,7 @@ import { estimateTokens } from "../../lib/token-estimate";
 import {
   CHATGPT_WEB_BACKEND_MODEL,
   isChatGptWebZeroRiskBackendModel,
+  isChatGptWebProModel,
   resolveChatGptWebContextLimits,
   resolveChatGptWebMessageTokenBudget,
   resolveChatGptWebTransportLimits,
@@ -67,6 +68,7 @@ export function resolveBiggerContextMultipartParts(
   parsed: CodexParsedRequest,
   capabilities: ChatGptWebCapabilities,
 ): ChatGptWebMultipartPartCount | undefined {
+  if (isChatGptWebProModel(parsed.modelId, parsed.options.reasoning)) return undefined;
   if (isChatGptWebZeroRiskBackendModel(parsed.modelId)) {
     throw new Error("Bigger Context is unavailable for ChatGPT Zero Risk");
   }
@@ -93,7 +95,7 @@ export function resolveBiggerContextMultipartParts(
     const messages = compiledChatGptWebMessages(compiled);
     // Inert stages may use any explicitly available staging effort; execution keeps the chosen
     // effort. These are the widest stage modes used by the browser's existing selector.
-    const stagingEffort = capabilities.proAvailable ? "max" : "medium";
+    const stagingEffort = "medium";
     for (const [index, text] of messages.entries()) {
       const final = index === messages.length - 1;
       const effort = final ? mode.effort : stagingEffort;

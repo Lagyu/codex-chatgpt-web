@@ -1,5 +1,9 @@
 # Release validation
 
+For custom build `5.0.7-pro-context.1`, see the [local validation receipt](pro-context-validation.md).
+Its Pro policy supersedes the generic compaction expectations below. The account-bound public
+release gates below have not been certified for this custom build.
+
 CI proves that the runtime builds, the launcher starts, and native packages pass their smoke
 contract on macOS, Windows, and Linux. It does not prove an authenticated ChatGPT session, a live
 MCP connector, or a complete Codex turn. A release candidate is not ready until those account-bound

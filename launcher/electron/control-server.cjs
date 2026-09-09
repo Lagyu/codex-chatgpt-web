@@ -191,6 +191,9 @@ class BrowserControlServer {
           if (body.compaction !== undefined && body.compaction !== true) {
             throw new Error("manual compaction flag is invalid");
           }
+          if (body.requireRetainedConversation !== undefined && body.requireRetainedConversation !== true) {
+            throw new Error("manual retained conversation requirement is invalid");
+          }
           const lease = host.beginManualTurn(
             body.traceId,
             body.helperPid,
@@ -198,6 +201,7 @@ class BrowserControlServer {
             body.conversationKey,
             body.resumePrompt,
             body.compaction === true,
+            body.requireRetainedConversation === true,
           );
           this.logger.info("browser.manual_control_started", {
             traceId: body.traceId,

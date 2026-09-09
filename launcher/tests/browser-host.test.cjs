@@ -92,6 +92,55 @@ test("primary browser bootstrap accepts only the exact committed idle document",
   assert.equal(contents.listenerCount("destroyed"), 0);
 });
 
+test("a cold renderer can commit after ten seconds without retrying, while a stalled bootstrap stays bounded", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const fixture = delayed => {
+    const contents = new EventEmitter();
+    let currentUrl = "about:blank";
+    let loads = 0;
+    let stops = 0;
+    contents.isDestroyed = () => false;
+    contents.getURL = () => currentUrl;
+    contents.stop = () => { stops += 1; };
+    contents.loadURL = url => {
+      loads += 1;
+      if (delayed) setTimeout(() => {
+        currentUrl = url;
+        contents.emit("did-finish-load");
+      }, 22_000);
+      return new Promise(() => {});
+    };
+    return { contents, counts: () => ({ loads, stops }) };
+  };
+
+  const control = fixture(true);
+  const oldDeadline = assert.rejects(
+    loadCommittedBrowserSurface(control.contents, IDLE_BROWSER_URL, 10_000), /within 10000ms/,
+  );
+  t.mock.timers.tick(10_000);
+  await oldDeadline;
+  t.mock.timers.tick(12_000);
+  assert.deepEqual(control.counts(), { loads: 1, stops: 1 });
+  assert.equal(control.contents.listenerCount("did-finish-load"), 0);
+
+  const cold = fixture(true);
+  const committed = loadCommittedBrowserSurface(cold.contents, IDLE_BROWSER_URL);
+  t.mock.timers.tick(22_000);
+  await committed;
+  assert.deepEqual(cold.counts(), { loads: 1, stops: 0 });
+  assert.equal(cold.contents.listenerCount("did-finish-load"), 0);
+
+  const stalled = fixture(false);
+  const deadline = assert.rejects(
+    loadCommittedBrowserSurface(stalled.contents, IDLE_BROWSER_URL), /within 60000ms/,
+  );
+  t.mock.timers.tick(59_999);
+  assert.deepEqual(stalled.counts(), { loads: 1, stops: 0 });
+  t.mock.timers.tick(1);
+  await deadline;
+  assert.deepEqual(stalled.counts(), { loads: 1, stops: 1 });
+});
+
 test("primary browser bootstrap fails closed on navigation, renderer, and timeout boundaries", async () => {
   const keepTestAlive = setTimeout(() => {}, 100);
   try {
@@ -2729,6 +2778,25 @@ test("a retained manual chat copies only its incremental resume prompt", () => {
   assert.deepEqual(clipboardWrites, ["full initial context", "only the new request"]);
   assert.equal(fixture.turnTabs.get(second.tabId).prompt, "only the new request");
   clearTimeout(fixture.turnTabs.get(second.tabId).manualDeadlineTimer);
+});
+
+test("manual Pro requires its retained chat before copying or creating another prompt", () => {
+  const { fixture, clipboardWrites } = manualTurnFixture();
+  const key = "a".repeat(64);
+  assert.throws(() => fixture.beginManualTurn("pro_missing", process.pid, "bootstrap", key,
+    "new request", false, true), { code: "retained_conversation_unavailable" });
+  assert.equal(fixture.turnTabs.size, 0);
+  assert.deepEqual(clipboardWrites, []);
+
+  const first = fixture.beginManualTurn("pro_first", process.pid, "initial instructions", key);
+  fixture.confirmManualSent(first.tabId);
+  fixture.markManualTurnStarted("pro_first", process.pid);
+  fixture.endManualTurn("pro_first", process.pid, "completed", true);
+  const next = fixture.beginManualTurn("pro_next", process.pid, "unused bootstrap", key,
+    "only the new request", false, true);
+  assert.equal(next.tabId, first.tabId);
+  assert.deepEqual(clipboardWrites, ["initial instructions", "only the new request"]);
+  fixture.cancelManualTurn("pro_next", process.pid);
 });
 
 test("manual navigation preserves initial setup but retires a completed page's continuation", () => {

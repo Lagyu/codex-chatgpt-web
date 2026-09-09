@@ -13,7 +13,7 @@ import { biggerContextPartCount } from "../src/adapters/chatgpt-web/usage";
 import type { CodexParsedRequest } from "../src/types";
 
 function request(reasoning: "low" | "medium" | "high" | "xhigh" | "max"): CodexParsedRequest {
-  return {
+  const parsed: CodexParsedRequest = {
     modelId: CHATGPT_WEB_MODEL_ID,
     context: {
       systemPrompt: ["preserve-system"],
@@ -25,6 +25,14 @@ function request(reasoning: "low" | "medium" | "high" | "xhigh" | "max"): CodexP
     stream: true,
     options: { reasoning },
   };
+  // Mirror fixture edits into the native wire input. Pro selects its new instruction from native
+  // item provenance, rather than treating the parsed message list as reconstructable context.
+  Object.defineProperty(parsed, "_rawBody", { get: () => ({
+    client_metadata: { "x-codex-turn-metadata": JSON.stringify({ thread_id: "prompt-contract", turn_id: "current" }) },
+    input: parsed.context.messages.map(message => ({ type: "message", role: message.role,
+      content: message.content, internal_chat_message_metadata_passthrough: { turn_id: "current" } })),
+  }) });
+  return parsed;
 }
 
 test("Full-mode Pro prompts pass one stable turn token directly to native actions", () => {
@@ -51,7 +59,9 @@ test("Full-mode Pro prompts pass one stable turn token directly to native action
   expect(transportOnly).toContain("For local work required by the task, use the attached Codex Native tools directly according to their declared descriptions and schemas.");
   expect(transportOnly).toContain("Call a Codex Native tool only when the latest active request requires a local effect or fresh local evidence that is not already present in the supplied context; otherwise answer the request directly without a tool call.");
   expect(transportOnly).toContain("Use actual Codex Native results as evidence for local observations and effects.");
-  expect(transportOnly).toContain("A Codex Native MCP tool result may require context compaction. If it does, follow the compaction instructions in that result exactly.");
+  expect(transportOnly).not.toContain("A Codex Native MCP tool result may require context compaction");
+  expect(transportOnly).toContain("Complete the turn inside this single assistant response");
+  expect(transportOnly).toContain("staging messages are disabled for Pro");
   expect(transportOnly).toContain("After a deterministic tool failure, update the working hypothesis from that result");
   expect(transportOnly).toContain("do not repeat the same call unless its inputs or observable state changed.");
   expect(transportOnly).toContain("Continue using the available tools until the requested work is complete and verified.");
@@ -282,7 +292,8 @@ test("Bigger Context compaction preserves history above the retired inline byte 
   for (let index = 1; index <= 6; index += 1) {
     expect(staged).toContain(`multipart-history-${index}-`);
   }
-});
+  // Nearly a megabyte of tokenization can exceed Bun's default timeout on a busy build host.
+}, 15_000);
 
 test("Bigger Context minimizes the largest ordered stage instead of overfilling a middle part", () => {
   const compact = request("high");
@@ -361,7 +372,7 @@ test("Web compaction fails closed when its final instruction alone exceeds the t
 });
 
 test("assigns prior assistant output to the model and never attributes Codex context to the human", () => {
-  const attributed = request("max");
+  const attributed = request("xhigh");
   attributed.context.messages = [
     { role: "user", content: "hi", timestamp: 1 },
     {

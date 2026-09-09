@@ -10,10 +10,12 @@ import {
 } from "../adapters/chatgpt-web/input-tokens";
 import {
   CHATGPT_WEB_LUNA_BACKEND_MODEL,
+  isChatGptWebProModel,
   requireChatGptWebModelRoute,
   resolveChatGptWebContextLimits,
 } from "../chatgpt-web-models";
 import type { AppConfig } from "../config";
+import { PRO_COMPACTION_DISABLED } from "../adapters/chatgpt-web/pro-context";
 import { parseRequest } from "../responses/parser";
 import { compactRequest, responseRequest, routeChatGptWebRequest } from "../server";
 import { namespacedToolName, type AdapterEvent, type CodexProviderConfig } from "../types";
@@ -41,6 +43,7 @@ export interface DevContextStatus {
   model: DevChatModel;
   inputTokens: number;
   autoCompactTokenLimit: number;
+  compactionEnabled?: boolean;
   contextWindow: number;
   browserInputTokenLimit?: number;
   percent: number;
@@ -571,7 +574,8 @@ export class DevChatDriver {
   }
 
   private shouldAutoCompact(state: DevChatState, context: DevContextStatus): boolean {
-    return !isLunaDevChatModel(state.model) && context.inputTokens >= context.autoCompactTokenLimit;
+    return !isChatGptWebProModel(state.model) && !isLunaDevChatModel(state.model)
+      && context.inputTokens >= context.autoCompactTokenLimit;
   }
 
   private assertBiggerContextModel(model: DevChatModel): void {
@@ -604,6 +608,7 @@ export class DevChatDriver {
       model: state.model,
       inputTokens,
       autoCompactTokenLimit,
+      ...(isChatGptWebProModel(state.model) ? { compactionEnabled: false } : {}),
       contextWindow,
       ...(route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL
         ? { browserInputTokenLimit: CHATGPT_LUNA_BROWSER_INPUT_TOKEN_BUDGET }
@@ -619,6 +624,7 @@ export class DevChatDriver {
     reason: "automatic" | "manual",
     emit: (event: DevChatEvent) => void,
   ): Promise<unknown[]> {
+    if (isChatGptWebProModel(state.model)) throw new Error(PRO_COMPACTION_DISABLED);
     if (isLunaDevChatModel(state.model)) {
       throw new Error("ChatGPT Web Luna uses its production rolling checkpoint and does not support a separate compact command");
     }

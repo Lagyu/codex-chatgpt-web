@@ -2937,7 +2937,7 @@ test("browser preflight separates model context from one-message transport limit
     "max",
     pro,
     520_001,
-  )).toThrow("104,000-token ChatGPT browser message boundary");
+  )).toThrow("single-message browser limit");
 });
 
 test("Bigger Context fits mixed-density whole records within both token and composer limits", () => {
@@ -2987,7 +2987,8 @@ test("Bigger Context fits mixed-density whole records within both token and comp
       { stagingEffort: stagingMode.effort, maxStageMessageTokens, maxStageChars, finalMessageTokens, finalMessageChars: final.length },
     )).not.toThrow();
   }
-}, 20_000);
+  // Megabytes of mixed-density tokenization test correctness here, not throughput.
+}, 60_000);
 
 test("Bigger Context preflight expands only the total context ceiling and keeps each message boundary", () => {
   const plus = {
@@ -3114,7 +3115,15 @@ test("Bigger Context stages use the lowest account mode that can carry the stage
   )).toThrow("No ChatGPT effort");
   expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", pro, 100_000, 500_000).effort).toBe("low");
   expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", pro, 100_000, 600_000).effort).toBe("medium");
-  expect(resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", pro, 104_000, 1_200_000).effort).toBe("max");
+  expect(() => resolveChatGptWebMultipartStagingMode("gpt-5.6-sol", pro, 104_000, 1_200_000)).toThrow("No ChatGPT effort");
+  expect(() => assertChatGptWebMultipartInputWithinLimits(
+    10_000, 5_000, "gpt-5.6-sol", "max", pro, 20_000, 2,
+  )).toThrow("Pro does not support multipart");
+  expect(() => assertChatGptWebMultipartInputWithinLimits(
+    10_000, 5_000, "gpt-5.6-sol", "high", pro, 20_000, 2,
+    { stagingEffort: "max", maxStageMessageTokens: 5_000, maxStageChars: 20_000,
+      finalMessageTokens: 5_000, finalMessageChars: 20_000 },
+  )).toThrow("Pro does not support multipart");
   expect(() => resolveChatGptWebMultipartStagingMode(
     "gpt-5.6-luna",
     { localToolsEnabled: false, solAvailable: false, proAvailable: false },

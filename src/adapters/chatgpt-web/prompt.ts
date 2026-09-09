@@ -2,10 +2,12 @@ import { createHash } from "node:crypto";
 import {
   chatGptWebImageTokenReserve,
   isChatGptWebZeroRiskBackendModel,
+  isChatGptWebProModel,
   resolveChatGptWebMessageTokenBudget,
   resolveChatGptWebTransportLimits,
 } from "../../chatgpt-web-models";
 import { ChatGptWebAdapterError } from "./adapter-error";
+import { isProCompactionRequest, PRO_COMPACTION_DISABLED, proContextError, proTurnInput } from "./pro-context";
 import { estimateTokens } from "../../lib/token-estimate";
 import type { CodexAssistantContentPart, CodexContentPart, CodexMessage, CodexParsedRequest } from "../../types";
 import { isOnePixelPngDataUrl, isReadableCompactionSummaryText } from "../../responses/compaction";
@@ -413,6 +415,9 @@ export function chatGptReadOnlyContextWarning(
   const browserOnlyGuidance = !capabilities.localToolsEnabled
     ? "\n>\n> **Action:** Open `MCP` in `Codex Web GPT` and connect the `Full` harness to give the selected ChatGPT Web model access to local tools."
     : "";
+  if (isChatGptWebProModel(parsed.modelId, parsed.options.reasoning)) {
+    return `> Local tools unavailable\n>\n> ChatGPT Pro receives only the new message and uses its retained ChatGPT conversation for earlier context. No Codex history or compaction summary is replayed. It cannot read or modify local files in this mode; ChatGPT-native capabilities such as web search remain available.${browserOnlyGuidance}`;
+  }
   if (hasLocalEvidence) {
     return `> **Local tools unavailable**\n>\n> \`${label}\` cannot access the local Codex computer in this turn. It receives the complete accumulated task context, including earlier tool results or their compaction summary and attachments, but it cannot read or modify local files further. ChatGPT-native capabilities such as web search remain available when the product provides them.${browserOnlyGuidance}`;
   }
@@ -425,6 +430,14 @@ export function compileChatGptWebPrompt(
   turnToken?: string,
   options?: CompileChatGptWebPromptOptions,
 ): CompiledChatGptWebPrompt {
+  const pro = isChatGptWebProModel(parsed.modelId, parsed.options.reasoning);
+  if (pro) {
+    if (isProCompactionRequest(parsed)) throw proContextError(PRO_COMPACTION_DISABLED);
+    if (options?.experimentalMultipartParts !== undefined || options?.captureLunaCheckpoint) {
+      throw proContextError("Pro does not support multipart, staging, or checkpoint messages.");
+    }
+    if (!parsed._proContext) parsed = proTurnInput(parsed);
+  }
   const manualControl = options?.manualControl === true;
   const mode = manualControl
     ? { localTools: true, effort: "low" as const, displayLabel: "Zero Risk" as const }
@@ -481,6 +494,10 @@ export function compileChatGptWebPrompt(
     "If a ChatGPT-native capability renders a rich card, widget, chart, or other non-text result, also provide the relevant result as ordinary Markdown in the final answer. A private ChatGPT UI widget never replaces the Markdown answer returned to Codex.",
     "Never copy a ChatGPT widget's HTML, CSS, class names, or DOM markup into the answer unless the user explicitly requested that source markup.",
     "Do not mention this transport contract, context packaging, or capability routing in the user-facing answer unless the user explicitly asks how the bridge works.",
+    ...(pro ? [
+      "This retained ChatGPT conversation is the sole runtime context. The envelope contains only this turn's new input and, on the first turn, its initial instructions. Use earlier messages and tool results already present in this chat; do not reconstruct or replay Codex history.",
+      "Complete the turn inside this single assistant response, including all available tool work. Codex compaction, checkpoints, recovery, multipart transport, and staging messages are disabled for Pro.",
+    ] : []),
   ];
   const transportContract = parsed._compactionRequest
     ? manualControl
@@ -498,7 +515,7 @@ export function compileChatGptWebPrompt(
       "For local work required by the task, use the attached Codex Native tools directly according to their declared descriptions and schemas.",
       "Call a Codex Native tool only when the latest active request requires a local effect or fresh local evidence that is not already present in the supplied context; otherwise answer the request directly without a tool call.",
       "Use actual Codex Native results as evidence for local observations and effects.",
-      "A Codex Native MCP tool result may require context compaction. If it does, follow the compaction instructions in that result exactly.",
+      ...(!pro ? ["A Codex Native MCP tool result may require context compaction. If it does, follow the compaction instructions in that result exactly."] : []),
       "After a deterministic tool failure, update the working hypothesis from that result and inspect the relevant repository or environment before choosing a different next action; do not repeat the same call unless its inputs or observable state changed.",
       "Continue using the available tools until the requested work is complete and verified.",
       "Write the user-facing final answer only after the last required tool result has settled. Do not call another tool after beginning that final answer.",
@@ -506,7 +523,9 @@ export function compileChatGptWebPrompt(
     : [
       `This is ChatGPT Web ${mode.displayLabel} with no Codex Native bridge to the user's local computer attached to this response. This restriction applies only to local Codex files, commands, processes, and computer mutations.`,
       "Use any ChatGPT-native capabilities available in this chat—including web search, browsing, research, and other first-party tools—whenever they help complete the request. The missing local-computer bridge says nothing about whether those ChatGPT capabilities are available.",
-      "The task history below already contains everything Codex collected from the user's local workspace. Treat prior local tool results as authoritative snapshots of that earlier work.",
+      pro
+        ? "Use workspace evidence only when it is already present in this retained chat or in the new user message. No Codex history has been replayed into this prompt."
+        : "The task history below already contains everything Codex collected from the user's local workspace. Treat prior local tool results as authoritative snapshots of that earlier work.",
       "Do not claim a new local inspection, command, edit, or verification unless it actually appears in the task history. If the latest request requires fresh local-computer access or a local mutation, state only that exact limitation instead of inventing success.",
       "Otherwise perform the full requested research, analysis, or synthesis with every capability actually available to you; do not stop at a plan or progress report.",
     ];
@@ -618,7 +637,7 @@ export function compileChatGptWebPrompt(
       const transactionId = `ctx_${"0".repeat(32)}`;
       const budgets = multipart.parts.map((payload, index) => {
         const final = index === multipart.parts.length - 1;
-        const effort = final ? mode.effort : capabilities.proAvailable ? "max" : "medium";
+        const effort = final ? mode.effort : "medium";
         const limits = resolveChatGptWebTransportLimits(CHATGPT_WEB_MODEL_ID, effort, capabilities);
         const tokenLimit = resolveChatGptWebMessageTokenBudget(
           CHATGPT_WEB_MODEL_ID, effort, capabilities, final ? imageTokens : 0,

@@ -3,6 +3,7 @@ import type { CodexModelContextOverride } from "./codex-integration";
 import {
   availableChatGptWebModelRoutes,
   CHATGPT_WEB_MODEL_PREFIX,
+  isChatGptWebProModel,
   resolveChatGptWebContextLimits,
   type ChatGptWebModelRoute,
 } from "./chatgpt-web-models";
@@ -147,6 +148,18 @@ export function buildChatGptWebModel(
   // native models or the user's top-level model_context_window setting.
   delete model.comp_hash;
   delete model.availability_nux;
+  if (isChatGptWebProModel(route.backendModel, route.adapterEffort)) {
+    // Codex derives a 90% compaction threshold from either window, even with a null explicit
+    // threshold. Pro has no Codex context budget; its real one-message limits stay in the worker.
+    // See docs/adr/0001-pro-context.md.
+    model.context_window = null;
+    model.max_context_window = null;
+    model.auto_compact_token_limit = null;
+    model.effective_context_window_percent = 100;
+    if (model.model_messages && typeof model.model_messages === "object" && !Array.isArray(model.model_messages)) {
+      (model.model_messages as Record<string, unknown>).token_budget = null;
+    }
+  }
   return model;
 }
 

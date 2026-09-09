@@ -22,6 +22,7 @@ function run(command, args, options = {}) {
     encoding: "utf8",
     maxBuffer: 8 * 1024 * 1024,
     timeout: options.timeout || 45_000,
+    killSignal: "SIGKILL",
     windowsHide: true,
   });
   if (result.error) throw result.error;
@@ -106,7 +107,8 @@ try {
   }
 
   if (!fs.existsSync(executable)) throw new Error(`Packaged launcher executable is missing: ${executable}`);
-  run(command, args, { env });
+  // Include the bounded cold-renderer startup and durable runtime installation (ADR 0003).
+  run(command, args, { env, timeout: 120_000 });
   if (!fs.existsSync(markerPath)) throw new Error("Packaged launcher did not write its readiness marker");
   const marker = JSON.parse(fs.readFileSync(markerPath, "utf8"));
   if (marker.ok !== true

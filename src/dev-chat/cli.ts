@@ -102,7 +102,9 @@ function modelFromCli(value: string | undefined): DevChatModel | undefined {
 }
 
 function statusLine(status: DevContextStatus): string {
-  const main = `${status.inputTokens.toLocaleString("en-US")} / ${status.autoCompactTokenLimit.toLocaleString("en-US")} tokens (${status.percent}%)`;
+  const main = status.compactionEnabled === false
+    ? `${status.inputTokens.toLocaleString("en-US")} new-message tokens; Pro uses retained ChatGPT context (Codex compaction disabled)`
+    : `${status.inputTokens.toLocaleString("en-US")} / ${status.autoCompactTokenLimit.toLocaleString("en-US")} tokens (${status.percent}%)`;
   const transport = status.browserInputTokenLimit
     ? ` · Luna browser request budget ${status.browserInputTokenLimit.toLocaleString("en-US")}`
     : "";

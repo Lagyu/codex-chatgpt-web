@@ -146,7 +146,7 @@ export class ChatGptThreadEnvironmentStore {
     private readonly sqliteHome?: string,
   ) {}
 
-  resolve(parsed: CodexParsedRequest): ChatGptTurnEnvironment {
+  resolve(parsed: CodexParsedRequest, { allowRecovery = true }: { allowRecovery?: boolean } = {}): ChatGptTurnEnvironment {
     const identity = extractChatGptTurnIdentity(parsed);
     try {
       const environment = extractChatGptTurnEnvironment(parsed);
@@ -154,6 +154,14 @@ export class ChatGptThreadEnvironmentStore {
       return environment;
     } catch (error) {
       if (!(error instanceof MissingTrustedCodexEnvironmentError) || !identity.threadId) throw error;
+      if (!allowRecovery) {
+        // Pro may reuse already authenticated filesystem authority, never reconstruct authority
+        // or model context from native rollouts, compacted history, or a parent's transcript.
+        if (hasCurrentChatGptEnvironmentContext(parsed)) throw error;
+        const cached = this.get(identity.threadId);
+        if (!cached) throw error;
+        return { ...cached, tools: parsed.context.tools ?? [] };
+      }
       const hasCurrentContext = hasCurrentChatGptEnvironmentContext(parsed);
       const lineage = extractChatGptThreadSpawnLineage(parsed);
       const currentCompaction = hasCurrentContext && isChatGptCompactionContinuation(parsed);

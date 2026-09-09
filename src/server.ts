@@ -1,4 +1,4 @@
-import { chatGptWebTraceId, createChatGptWebAdapter } from "./adapters/chatgpt-web";
+import { assertProRequestAvailable, chatGptWebTraceId, createChatGptWebAdapter } from "./adapters/chatgpt-web";
 import { closeChatGptBrowserWorkers } from "./adapters/chatgpt-web/browser-worker";
 import { closeTurnBrokers, TurnBroker } from "./adapters/chatgpt-web/turn-broker";
 import { timingSafeEqual } from "node:crypto";
@@ -16,6 +16,7 @@ import {
   extractChatGptCompactionSourceRevision,
 } from "./adapters/chatgpt-web/environment";
 import { rememberCompactionContinuation } from "./adapters/chatgpt-web/compaction-continuation";
+import { isProCompactionRequest, PRO_COMPACTION_DISABLED } from "./adapters/chatgpt-web/pro-context";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse } from "./bridge";
 import type { AppConfig } from "./config";
 import { providerConfig } from "./config";
@@ -32,6 +33,7 @@ import {
 import {
   CHATGPT_WEB_LUNA_BACKEND_MODEL,
   isChatGptWebModelSlug,
+  isChatGptWebProModel,
   requireChatGptWebModelRoute,
   type ChatGptWebModelRoute,
 } from "./chatgpt-web-models";
@@ -481,7 +483,8 @@ export async function responseRequest(
   const requestedPreviousResponseId = raw && typeof raw === "object" && !Array.isArray(raw)
     ? (raw as { previous_response_id?: unknown }).previous_response_id
     : undefined;
-  const expanded = expandPreviousResponseInput(raw);
+  const pro = typeof requestedModel === "string" && isChatGptWebProModel(requestedModel);
+  const expanded = pro ? raw : expandPreviousResponseInput(raw);
   let parsed: CodexParsedRequest;
   let route: ChatGptWebModelRoute;
   try {
@@ -502,7 +505,7 @@ export async function responseRequest(
         + "Start a new Compatibility V1 task, or delegate from a Web model whose collaboration call uses the plaintext-delivery marker.",
     );
   }
-  if (typeof requestedPreviousResponseId === "string" && expanded === raw) {
+  if (!pro && typeof requestedPreviousResponseId === "string" && expanded === raw) {
     return formatErrorResponse(
       409,
       "invalid_request_error",
@@ -511,7 +514,9 @@ export async function responseRequest(
   }
 
   const compaction = parsed._compactionRequest === true;
+  if (pro && isProCompactionRequest(parsed)) return formatErrorResponse(400, "invalid_request_error", PRO_COMPACTION_DISABLED);
   const rememberCompletedResponse = (response: Record<string, unknown>): void => {
+    if (pro) return;
     if (!compaction) {
       if (options.rememberState !== false) rememberResponseState(parsed._rawBody, response, { force: true });
       return;
@@ -551,6 +556,10 @@ export async function responseRequest(
   }
 
   const provider = providerConfig(config);
+  if (pro) {
+    try { assertProRequestAvailable(provider, parsed); }
+    catch (error) { return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error)); }
+  }
   let traceId: string | undefined;
   try {
     traceId = chatGptWebTraceId(provider, parsed);
@@ -708,6 +717,9 @@ export async function compactRequest(
     route = requireChatGptWebModelRoute(raw.model, config);
   } catch (error) {
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
+  }
+  if (isChatGptWebProModel(route.backendModel, route.adapterEffort)) {
+    return formatErrorResponse(400, "invalid_request_error", PRO_COMPACTION_DISABLED);
   }
   if (route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL) {
     return formatErrorResponse(

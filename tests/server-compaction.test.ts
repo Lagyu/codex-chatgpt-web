@@ -75,28 +75,36 @@ test("compacts ChatGPT Web v1 through a dedicated read-only browser summarizatio
   ]);
 });
 
-test("compacts a Pro task with Pro effort", async () => {
+for (const proModel of ["chatgpt-web/pro", "chatgpt-web/zero-risk-pro"]) {
+for (const version of ["v1", "v2", "native"]) test(`rejects ${version} compaction for ${proModel} before creating an adapter`, async () => {
   const config = defaultConfig("full");
   config.proAvailable = true;
-  const response = await compactRequest(new Request("http://127.0.0.1:17841/v1/responses/compact", {
+  if (proModel.endsWith("zero-risk-pro")) {
+    config.browserInteractionMode = "manual";
+    config.zeroRiskProEnabled = true;
+  }
+  let starts = 0;
+  const response = await (version === "v1" ? compactRequest : responseRequest)(new Request("http://127.0.0.1:17841/v1/responses/compact", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      model: "chatgpt-web/pro",
-      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "Inspect" }] }],
+      model: proModel,
+      ...(version === "native" ? { client_metadata: { "x-codex-turn-metadata": JSON.stringify({ request_kind: "compaction" }) } } : {}),
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "Inspect" }] },
+        ...(version === "v2" ? [{ type: "compaction_trigger" }] : [])],
     }),
   }), config, () => ({
     name: "pro-compaction-effort-check",
-    async runTurn(parsed, _incoming, emit) {
-      expect(parsed._compactionRequest).toBe(true);
-      expect(parsed.options.reasoning).toBe("max");
-      emit({ type: "text_delta", text: summary, phase: "final_answer" });
-      emit({ type: "done", stopReason: "stop", endTurn: true });
+    async runTurn() {
+      starts += 1;
     },
   }));
 
-  expect(response.status).toBe(200);
+  expect(response.status).toBe(400);
+  expect(starts).toBe(0);
+  expect(await response.text()).toContain("compaction is disabled for Pro");
 });
+}
 
 test("preserves canonical Codex turn metadata from the compact endpoint header", async () => {
   const turnMetadata = { thread_id: "thread_compact", turn_id: "turn_compact" };

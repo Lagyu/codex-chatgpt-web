@@ -1258,8 +1258,13 @@ void start().catch((error) => {
   try {
     fs.appendFileSync(path.join(app.getPath("logs"), "launcher-fatal.log"), `${new Date().toISOString()} ${error?.stack || error}\n`);
   } catch {}
-  try {
-    dialog.showErrorBox("Codex Web GPT could not start", message);
-  } catch {}
+  if (process.argv.includes("--launcher-smoke-test")) {
+    // An unattended package check must exit with its failure, not wait on a modal dialog.
+    console.error(error);
+  } else {
+    try {
+      dialog.showErrorBox("Codex Web GPT could not start", message);
+    } catch {}
+  }
   app.exit(1);
 });

@@ -396,6 +396,8 @@ export interface LauncherManualTurnStart extends LauncherManualTurnOwner {
   /** Used only when the exact retained ChatGPT conversation already owns the accumulated history. */
   resumePrompt?: string;
   conversationKey?: string;
+  /** Pro must fail before clipboard changes if its sole runtime context was lost. */
+  requireRetainedConversation?: true;
   /** Gives a manual context handoff enough time without widening ordinary Zero Risk turns. */
   compaction?: true;
 }

@@ -7,6 +7,8 @@ export interface CodexParsedRequest {
   _rawBody?: unknown;
   /** Number of leading raw input items restored from local previous_response_id state. */
   _replayPrefixLen?: number;
+  /** Adapter-owned Pro prompt projection; never accepted from Responses request fields. */
+  _proContext?: "initial" | "continuation";
   /**
    * True when the input carried `{type:"compaction_trigger"}` — Codex remote compaction v2 asking
    * this turn to produce a `{type:"compaction"}` output item. Routed adapters can't natively;
