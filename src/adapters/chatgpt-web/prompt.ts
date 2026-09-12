@@ -180,7 +180,7 @@ const DROPPED_IMAGE_NOTE =
 /**
  * A fresh compaction epoch receives the complete canonical context, so every still-relevant image
  * must be attached on that first message. Retained continuation messages send only their new
- * canonical suffix because prior images remain in the same Temporary Chat. The per-message image
+ * canonical suffix because prior images remain in the same regular chat. The per-message image
  * limit still drops overflow from the oldest end so the images the task is actively working on
  * survive.
  */

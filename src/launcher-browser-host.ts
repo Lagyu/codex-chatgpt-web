@@ -3,6 +3,8 @@ import { resolve } from "node:path";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
 import { expandUserPath } from "./config";
 import { processRunning } from "./process";
+import { isRegularChatUrl } from "./chatgpt-session";
+import { LauncherSmokeTestBusyError, waitForLauncherSmokeTest } from "./launcher-smoke-wait";
 
 export const LAUNCHER_BROWSER_HOST_KIND = "codex-web-gpt-launcher";
 export const LAUNCHER_BROWSER_IDLE_URL = "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3ECodex%20Web%20GPT%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E#codex-web-gpt-browser-host";
@@ -290,7 +292,14 @@ export async function connectLauncherBrowserHost(
   }
 }
 
-export async function inspectLauncherBrowserHost(
+export function inspectLauncherBrowserHost(
+  descriptorPath: string,
+  options: Parameters<typeof inspectLauncherBrowserHostOnce>[1] = {},
+): ReturnType<typeof inspectLauncherBrowserHostOnce> {
+  return waitForLauncherSmokeTest(() => inspectLauncherBrowserHostOnce(descriptorPath, options));
+}
+
+async function inspectLauncherBrowserHostOnce(
   descriptorPath: string,
   options: {
     detectCapabilities?: boolean;
@@ -324,8 +333,11 @@ export async function inspectLauncherBrowserHost(
       signal: controller.signal,
     });
     const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+    if (response.status === 503 && body.code === "browser_smoke_test_busy") {
+      throw new LauncherSmokeTestBusyError("The browser smoke test is still running");
+    }
     if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : `HTTP ${response.status}`);
-    if (body.authenticated !== true || body.temporary !== true || typeof body.url !== "string") {
+    if (body.authenticated !== true || body.regular !== true || typeof body.url !== "string" || !isRegularChatUrl(body.url)) {
       throw new Error("Launcher returned invalid ChatGPT session evidence");
     }
     if (options.detectCapabilities
@@ -343,6 +355,7 @@ export async function inspectLauncherBrowserHost(
       } : {}),
     };
   } catch (error) {
+    if (error instanceof LauncherSmokeTestBusyError) throw error;
     const detail = timedOut
       ? `session inspection timed out after ${timeoutMs}ms`
       : error instanceof Error ? error.message : String(error);
@@ -610,7 +623,17 @@ export async function cancelLauncherManualTurn(
   if (!response.ok) throwManualControlError(response, body);
 }
 
-export async function notifyLauncherTurn(
+export function notifyLauncherTurn(
+  descriptorPath: string,
+  activity: LauncherTurnActivity,
+  timeoutMs?: number,
+  abortSignal?: AbortSignal,
+): ReturnType<typeof notifyLauncherTurnOnce> {
+  const request = () => notifyLauncherTurnOnce(descriptorPath, activity, timeoutMs, abortSignal);
+  return activity.phase === "start" ? waitForLauncherSmokeTest(request, abortSignal) : request();
+}
+
+async function notifyLauncherTurnOnce(
   descriptorPath: string,
   activity: LauncherTurnActivity,
   timeoutMs = activity.phase === "end"
@@ -618,14 +641,18 @@ export async function notifyLauncherTurn(
     : activity.phase === "heartbeat"
       ? LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS
       : LAUNCHER_TURN_START_TIMEOUT_MS,
+  abortSignal?: AbortSignal,
 ): Promise<{
   surfaceId?: string;
   reused?: boolean;
   connectorBound?: boolean;
   cancelledByUser?: boolean;
 }> {
+  abortSignal?.throwIfAborted();
   const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
   const controller = new AbortController();
+  const abort = () => controller.abort(abortSignal?.reason);
+  abortSignal?.addEventListener("abort", abort, { once: true });
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(`${descriptor.control.endpoint}/v1/turn/${activity.phase}`, {
@@ -639,6 +666,9 @@ export async function notifyLauncherTurn(
     });
     if (!response.ok) {
       const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+      if (response.status === 503 && body.code === "browser_smoke_test_busy") {
+        throw new LauncherSmokeTestBusyError("The browser smoke test is still running");
+      }
       if (response.status === 409 && body.code === "turn_cancelled") {
         throw new LauncherBrowserTurnCancelledError(
           typeof body.error === "string" ? body.error : `Browser turn ${activity.traceId} was cancelled by the user`,
@@ -677,11 +707,14 @@ export async function notifyLauncherTurn(
     }
     return {};
   } catch (error) {
-    if (error instanceof LauncherBrowserTurnCancelledError
+    abortSignal?.throwIfAborted();
+    if (error instanceof LauncherSmokeTestBusyError
+      || error instanceof LauncherBrowserTurnCancelledError
       || error instanceof LauncherRetainedConversationUnavailableError) throw error;
     throw new Error(`Launcher browser control channel failed: ${error instanceof Error ? error.message : String(error)}`);
   } finally {
     clearTimeout(timer);
+    abortSignal?.removeEventListener("abort", abort);
   }
 }
 

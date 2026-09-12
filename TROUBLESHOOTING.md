@@ -59,7 +59,7 @@ tracked in [#205](https://github.com/miuuyy/codex-chatgpt-web/issues/205), but i
 The launcher must own the ChatGPT session used for model turns. Signing in to an unrelated browser
 window does not automatically transfer that session.
 
-- Complete ordinary sign-in inside the launcher-owned flow and wait until a Temporary Chat composer
+- Complete ordinary sign-in inside the launcher-owned flow and wait until a regular chat composer
   is visible.
 - Do not navigate or close the launcher browser while authentication or session verification is
   running.
@@ -70,17 +70,17 @@ window does not automatically transfer that session.
   profile; there is no safe generic workaround to claim yet.
 
 If an ordinary login still fails, export a safe log immediately after one attempt. Include the OS,
-launcher version, account tier, sign-in provider, and whether the Temporary Chat composer ever
+launcher version, account tier, sign-in provider, and whether the regular chat composer ever
 appeared. Never upload cookies, browser storage, authentication headers, or raw profile files.
 
 ## The browser smoke test fails
 
 The smoke test and real turns use the same current ChatGPT controls. Errors mentioning the effort
-control, composer, send button, Temporary Chat, personalization, or an operational viewport usually
+control, composer, send button, regular chat, or an operational viewport usually
 mean that the ChatGPT UI did not expose a structure the bridge can safely prove.
 
 1. Update to the latest release.
-2. Confirm that a normal Temporary Chat can be opened in the launcher and that the account is not
+2. Confirm that a normal regular chat can be opened in the launcher and that the account is not
    showing a login, onboarding, capacity, or rate-limit dialog.
 3. Run the smoke test one more time with the launcher visible.
 4. If the same structural error remains, do not keep retrying. Export a safe log and open a focused
@@ -237,3 +237,12 @@ enough to distinguish setup, routing, browser DOM, account, and MCP failures.
 Before uploading anything, read [SECURITY.md](SECURITY.md). Never publish raw launcher logs, cookies,
 browser storage, API keys, Tunnel IDs, full Codex prompts, tool output containing private data, or
 absolute private paths.
+
+## Browser smoke test is busy
+
+The smoke test owns the browser until its completed response or the 90-second helper deadline.
+Incoming automatic tasks and session checks wait for this explicit busy state for up to two
+minutes, then continue with the same request identity. Cancelling a waiting task prevents it
+from starting later. No ChatGPT prompt is replayed. The expected smoke text alone does not prove
+completion: ChatGPT must also stop generating and expose its completed-turn action.
+See [ADR-0006](docs/adr/0006-smoke-contention.md).

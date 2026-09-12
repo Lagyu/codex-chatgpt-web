@@ -25,7 +25,7 @@
 Free and Go accounts get **ChatGPT Web — Luna** in Codex's native model picker. Accounts that
 expose the reasoning selector keep **Instant**, **Medium**, **High**, **Extra High**, and **Pro** as
 their subscription allows. The bridge sends the current compiled Codex task context to a fresh
-ChatGPT Temporary Chat, attaches images, and streams visible reasoning, tool activity, and Markdown
+ChatGPT regular chat, attaches images, and streams visible reasoning, tool activity, and Markdown
 back into the same Codex task.
 
 <p align="center">
@@ -39,17 +39,24 @@ Codex task ──Responses + SSE──▶ codex-chatgpt-web ──embedded brows
 ```
 
 Codex keeps the native task, context lifecycle, UI, and tool harness. The local Responses bridge
-routes only the selected model task through a task-bound ChatGPT Temporary Chat; in full mode, MCP
+routes only the selected model task through a task-bound ChatGPT regular chat; in full mode, MCP
 connects ChatGPT back to the tools of that same Codex task. Pro retains its ChatGPT conversation
 without Codex compaction; other efforts retain their existing context lifecycle.
 
 ## Pro retained-context build
 
-This custom build (`5.0.7-pro-context.1`) sends one new user message per native Codex turn for
+This custom build (`5.0.7-pro-context.3`) sends one new user message per native Codex turn for
 automatic Pro and Zero Risk Pro. The first message includes the task's initial instructions;
 later messages contain only the new input. All local-tool/MCP rounds stay inside that turn's
 single ChatGPT assistant response. Codex history replay, reconstruction, compaction, automatic
 recovery, multipart transport, and staging are disabled for Pro, including with Bigger Context on.
+
+Regular chats are used for automatic and manual tasks, login, and verification. The bridge does
+not toggle personalization. A visible **Thinking failed** status ends the turn with an explicit
+error, including when its reasoning panel is collapsed. It never automatically replays that turn.
+Switching chat mode is an operator-requested experiment; it is not a proven fix for ChatGPT's
+underlying failure. See [regular chat policy](docs/adr/0004-regular-chats.md) and
+[terminal failure detection](docs/adr/0005-thinking-failed.md).
 
 Start a new Codex task after installing and restarting the Launcher and Codex. Keep the task's
 ChatGPT tab open. A missing chat or lost in-flight response produces an explicit error; it cannot
@@ -76,7 +83,7 @@ See the [decision record](docs/adr/0001-pro-context.md) for implementation, expe
 - **The full Codex harness over MCP.** Full mode gives every effort exposed by the signed-in account,
   including Pro, the active task's filesystem, shell, images, approvals, and configured tools/apps.
 - **Continuous task sessions and native compaction.** Sequential messages reuse one task-bound
-  Temporary Chat. For non-Pro models, at the context boundary the retained agent writes a checkpoint before Codex
+  regular chat. For non-Pro models, at the context boundary the retained agent writes a checkpoint before Codex
   starts a clean chat; if that chat was closed, canonical Codex history supplies the fallback.
 - **One cross-platform launcher.** The macOS, Windows, and Linux app owns sign-in, model setup, MCP
   guidance, health checks, safe diagnostics, and up to five visible task-bound browser tabs.
@@ -84,11 +91,9 @@ See the [decision record](docs/adr/0001-pro-context.md) for implementation, expe
   instead of silently switching route or capability. End-to-end coverage is documented in
   [release validation](docs/release-validation.md).
 
-Temporary Chat is a ChatGPT privacy mode, not anonymity or local-only inference: prompts are still
-processed by OpenAI and are subject to the account's settings and OpenAI's
-[Temporary Chat policy](https://help.openai.com/en/articles/8914046-temporary-chat-faq). This project
-is unofficial; users remain responsible for complying with applicable OpenAI terms and workspace
-policies.
+This build always opens regular chats and leaves the account's personalization setting unchanged.
+Chats use your existing ChatGPT history settings. Prompts are still processed by OpenAI.
+This project is unofficial; users remain responsible for applicable OpenAI terms and workspace policies.
 
 ## Quick start
 
@@ -231,7 +236,7 @@ Responses daemon or changes Codex. Optional Full setup starts and supervises onl
 tunnel, using the distinct ChatGPT connector name `Codex Native2 DEV`.
 
 `dev:chat` is a named, persistent synthetic outer-Codex harness. It executes the current working
-tree through that isolated launcher browser, Temporary Chat, prompt compiler, Responses parser, and
+tree through that isolated launcher browser, regular chat, prompt compiler, Responses parser, and
 compaction handlers. Optional Full setup also exercises the MCP connector and broker; tool effects
 are explicit simulation receipts. Browser-only chats expose no outer tools. It does
 not open a Responses listener, change `openai_base_url`, stop the live daemon, or claim port 17841.

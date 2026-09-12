@@ -24,7 +24,7 @@ const {
   shellZoomActionForInput,
 } = require("./browser-state.cjs");
 
-const TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
+const REGULAR_CHAT_URL = "https://chatgpt.com/";
 const CHATGPT_ORIGIN = "https://chatgpt.com";
 const IDLE_BROWSER_URL = "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3ECodex%20Web%20GPT%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E#codex-web-gpt-browser-host";
 // Cold signed Electron renderers can start after the old ten-second deadline (ADR 0003).
@@ -93,6 +93,12 @@ const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, mil
 
 function javaScriptLiteral(value) {
   return JSON.stringify(value).replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
+}
+
+function browserBusyError(operation, already = false) {
+  const error = new Error(`ChatGPT browser is ${already ? "already " : ""}busy with ${operation}`);
+  if (operation === "browser smoke test") error.code = "browser_smoke_test_busy";
+  return error;
 }
 
 function combinedError(primary, label, secondary) {
@@ -170,16 +176,20 @@ function isAbortedNavigationError(error) {
   return error instanceof Error && /\bERR_ABORTED\b/.test(error.message);
 }
 
-function isTemporaryChatUrl(value) {
+function isRegularChatUrl(value, origin = CHATGPT_ORIGIN) {
   let parsed;
   try {
     parsed = new URL(value);
   } catch {
     return false;
   }
-  return parsed.origin === CHATGPT_ORIGIN
-    && parsed.pathname === "/"
-    && parsed.searchParams.get("temporary-chat") === "true";
+  return parsed.origin === origin
+    && (parsed.pathname === "/" || /^\/c\/[^/]+$/.test(parsed.pathname))
+    && !parsed.searchParams.has("temporary-chat");
+}
+
+function isRegularChatHomeUrl(value) {
+  return isRegularChatUrl(value) && new URL(value).pathname === "/";
 }
 
 function isChatGptBackendUrl(value) {
@@ -458,7 +468,7 @@ class BrowserHost {
       throw new Error("Browser interaction mode must be automatic or manual");
     }
     if (this.manualOperation) {
-      throw new Error(`ChatGPT browser is already busy with ${this.manualOperation}`);
+      throw browserBusyError(this.manualOperation, true);
     }
     this.assertTurnTabsCanResetForInteractionModeChange();
     this.interactionModeOverride = mode;
@@ -627,7 +637,7 @@ class BrowserHost {
       ordinal,
       label: `ChatGPT ${ordinal}`,
       pageTitle: "ChatGPT",
-      url: TEMPORARY_CHAT_URL,
+      url: REGULAR_CHAT_URL,
       loading: true,
       message: "Paste the copied prompt, add any images yourself because Zero Risk cannot transfer them, choose a model and effort, then press Sent",
       interactionMode: "manual",
@@ -673,7 +683,7 @@ class BrowserHost {
     }
     if (this.turnTabs.get(tab.id) !== tab || contents.isDestroyed()) return;
     try {
-      await contents.loadURL(TEMPORARY_CHAT_URL);
+      await contents.loadURL(REGULAR_CHAT_URL);
     } catch (error) {
       if (this.turnTabs.get(tab.id) !== tab || contents.isDestroyed()) return;
       if (isAbortedNavigationError(error)) {
@@ -1151,11 +1161,11 @@ class BrowserHost {
 
   async refreshChatGptHomeDocument() {
     // A navigation from the idle host already creates a fresh ChatGPT document. Reload only an
-    // existing Temporary Chat document so the helper observes one authoritative SPA bootstrap.
-    if (isTemporaryChatUrl(this.view.webContents.getURL())) {
+    // existing regular chat document so the helper observes one authoritative SPA bootstrap.
+    if (isRegularChatHomeUrl(this.view.webContents.getURL())) {
       await this.hardRefreshHome();
     } else {
-      await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
+      await this.view.webContents.loadURL(REGULAR_CHAT_URL);
     }
     await this.waitForAuthenticated(60_000);
   }
@@ -1734,9 +1744,9 @@ class BrowserHost {
     this.syncViewVisibility();
     this.logger.info("browser.auth_surface_closed");
     if (refreshMain && this.manualOperation === "ChatGPT login" && !this.view.webContents.isDestroyed()) {
-      void this.view.webContents.loadURL(TEMPORARY_CHAT_URL).catch((error) => {
+      void this.view.webContents.loadURL(REGULAR_CHAT_URL).catch((error) => {
         this.logger.error("browser.auth_refresh_failed", {
-          origin: navigationOriginForLog(TEMPORARY_CHAT_URL),
+          origin: navigationOriginForLog(REGULAR_CHAT_URL),
           ...navigationErrorForLog(error),
         });
       });
@@ -1779,7 +1789,7 @@ class BrowserHost {
     if (inspectSession) requireAutomaticBrowserInspection(this, "ChatGPT session inspection");
     this.show();
     if (!this.selectedTurnTab() && this.view.webContents.getURL() === IDLE_BROWSER_URL) {
-      await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
+      await this.view.webContents.loadURL(REGULAR_CHAT_URL);
       if (inspectSession) await this.probeAuthentication();
     }
     return this.snapshot();
@@ -1910,7 +1920,7 @@ class BrowserHost {
 
   beginManualTurn(traceId, helperPid, prompt, conversationKey, resumePrompt, compaction = false, requireRetainedConversation = false) {
     if (this.manualOperation) {
-      throw new Error(`ChatGPT browser is busy with ${this.manualOperation}`);
+      throw browserBusyError(this.manualOperation);
     }
     if (typeof prompt !== "string" || prompt.length < 1 || prompt.length > MAX_MANUAL_PROMPT_CHARS) {
       throw new Error(`Manual prompt must contain between 1 and ${MAX_MANUAL_PROMPT_CHARS} characters`);
@@ -2217,7 +2227,7 @@ class BrowserHost {
     requireRetainedConversation = false,
   ) {
     if (this.manualOperation) {
-      throw new Error(`ChatGPT browser is busy with ${this.manualOperation}`);
+      throw browserBusyError(this.manualOperation);
     }
     if (this.userCancelledTurnOwners.has(traceId)) {
       throw new BrowserTurnCancelledError(traceId);
@@ -2392,7 +2402,7 @@ class BrowserHost {
         this.logger.info("browser.login_opened");
         const current = this.view.webContents.getURL();
         if (!current.startsWith(CHATGPT_ORIGIN)) {
-          await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
+          await this.view.webContents.loadURL(REGULAR_CHAT_URL);
         }
         await this.probeAuthentication();
         const authenticated = await this.waitForAuthenticated();
@@ -2466,7 +2476,7 @@ class BrowserHost {
   async resetFailedPasskeyLogin() {
     await this.clearOwnedSessionForPasskey();
     const contents = this.view.webContents;
-    await contents.loadURL(TEMPORARY_CHAT_URL);
+    await contents.loadURL(REGULAR_CHAT_URL);
     const browser = await this.probeAuthentication();
     if (browser.authenticated) throw new Error("Partial passkey session remained authenticated after cleanup");
     this.setState({ authenticated: false, loading: false, status: "signed-out", message: "Sign in to ChatGPT" });
@@ -2491,7 +2501,7 @@ class BrowserHost {
       for (const cookie of state.cookies) await contents.session.cookies.set(cookie);
       contents.session.flushStorageData();
       await contents.session.cookies.flushStore();
-      await contents.loadURL(TEMPORARY_CHAT_URL);
+      await contents.loadURL(REGULAR_CHAT_URL);
       if (state.localStorage.length > 0) {
         const entries = javaScriptLiteral(state.localStorage);
         await contents.executeJavaScript(`(() => {
@@ -2500,7 +2510,7 @@ class BrowserHost {
           }
           for (const entry of ${entries}) localStorage.setItem(entry.name, entry.value);
         })()`, true);
-        await contents.loadURL(TEMPORARY_CHAT_URL);
+        await contents.loadURL(REGULAR_CHAT_URL);
       }
       result = await this.waitForAuthenticated(60_000);
       await this.runSessionInspection(false);
@@ -2551,7 +2561,7 @@ class BrowserHost {
         message: "Signing out of ChatGPT",
         status: "loading",
       });
-      await contents.loadURL(TEMPORARY_CHAT_URL);
+      await contents.loadURL(REGULAR_CHAT_URL);
       const browser = await this.probeAuthentication();
       if (browser.authenticated) {
         throw new Error("ChatGPT session remained authenticated after local session data was cleared");
@@ -2568,8 +2578,8 @@ class BrowserHost {
     if (this.sessionRefreshOperation) return this.sessionRefreshOperation;
     const operation = this.withManualOperation("session refresh", async () => {
       this.setState({ status: "loading", message: "Checking saved ChatGPT session" });
-      if (!isTemporaryChatUrl(this.view.webContents.getURL())) {
-        await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
+      if (!isRegularChatHomeUrl(this.view.webContents.getURL())) {
+        await this.view.webContents.loadURL(REGULAR_CHAT_URL);
       }
       const state = await this.probeAuthentication();
       if (state.authenticated) {
@@ -2602,16 +2612,14 @@ class BrowserHost {
       return this.snapshot();
     }
     const probe = (contents) => contents.executeJavaScript(`(async () => {
-      const expectedUrl = new URL(${JSON.stringify(TEMPORARY_CHAT_URL)});
+      const expectedUrl = new URL(${JSON.stringify(REGULAR_CHAT_URL)});
       const readSurface = () => {
         const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
         const actualUrl = new URL(location.href);
         return {
           url: actualUrl.href,
           composer: Boolean(composer),
-          temporary: actualUrl.origin === expectedUrl.origin
-            && actualUrl.pathname === expectedUrl.pathname
-            && actualUrl.searchParams.get("temporary-chat") === "true",
+          regular: (${isRegularChatUrl.toString()})(actualUrl.href, expectedUrl.origin),
           readyState: document.readyState,
         };
       };
@@ -2654,32 +2662,32 @@ class BrowserHost {
     })()`, true).catch(() => ({
       url: "",
       composer: false,
-      temporary: false,
+      regular: false,
       sessionAuthenticated: false,
       readyState: "unknown",
     }));
     let result = await probe(this.view.webContents);
-    if (!(result.composer && result.temporary && result.sessionAuthenticated)
+    if (!(result.composer && result.regular && result.sessionAuthenticated)
       && this.authView
       && !this.authView.webContents.isDestroyed()) {
       const authResult = await probe(this.authView.webContents);
       if (authResult.sessionAuthenticated) {
         const completedAuthView = this.authView;
         this.closeAuthView(completedAuthView, true, false);
-        await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
+        await this.view.webContents.loadURL(REGULAR_CHAT_URL);
         url = this.view.webContents.getURL();
         result = await probe(this.view.webContents);
       }
     }
     if (this.manualOperation === "ChatGPT login"
       && result.sessionAuthenticated
-      && !result.temporary
+      && !result.regular
       && !this.view.webContents.isDestroyed()) {
-      await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
+      await this.view.webContents.loadURL(REGULAR_CHAT_URL);
       url = this.view.webContents.getURL();
       result = await probe(this.view.webContents);
     }
-    if (result.composer && result.temporary && result.sessionAuthenticated) {
+    if (result.composer && result.regular && result.sessionAuthenticated) {
       if (this.authView && !this.authView.webContents.isDestroyed()) {
         this.closeAuthView(this.authView, true, false);
       }
@@ -2810,7 +2818,7 @@ class BrowserHost {
       logger: this.logger,
     });
     const inspected = result?.value;
-    if (!inspected || inspected.authenticated !== true || inspected.temporary !== true || typeof inspected.url !== "string") {
+    if (!inspected || inspected.authenticated !== true || inspected.regular !== true || typeof inspected.url !== "string" || !isRegularChatUrl(inspected.url)) {
       throw new Error("Browser helper returned invalid ChatGPT session evidence");
     }
     if (detectCapabilities
@@ -2830,7 +2838,7 @@ class BrowserHost {
       throw new Error(`ChatGPT browser is running Codex turn ${this.activeTraceId}`);
     }
     if (this.manualOperation) {
-      throw new Error(`ChatGPT browser is already busy with ${this.manualOperation}`);
+      throw browserBusyError(this.manualOperation, true);
     }
     this.activateHomeSurface();
     this.manualOperation = name;
@@ -2933,11 +2941,12 @@ module.exports = {
   CHATGPT_VIEWPORT_CSS,
   IDLE_BROWSER_URL,
   isChatGptCloudflareChallengeResponse,
-  isTemporaryChatUrl,
+  isRegularChatHomeUrl,
+  isRegularChatUrl,
   loadCommittedBrowserSurface,
   MANUAL_SUBMIT_TIMEOUT_MS,
   MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS,
   navigationErrorForLog,
   navigationOriginForLog,
-  TEMPORARY_CHAT_URL,
+  REGULAR_CHAT_URL,
 };

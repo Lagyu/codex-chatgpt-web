@@ -3,6 +3,28 @@ const assert = require("node:assert/strict");
 const { BrowserHost } = require("../electron/browser-host.cjs");
 const { BrowserControlServer } = require("../electron/control-server.cjs");
 
+test("the control server marks smoke contention as a retryable admission refusal", async () => {
+  const busy = () => { throw Object.assign(new Error("smoke is running"), { code: "browser_smoke_test_busy" }); };
+  const server = await new BrowserControlServer({
+    logger: { info() {}, warn() {}, error() {} }, getPreferences: () => ({}),
+    getBrowserHost: () => ({ browserInteractionMode: () => "automatic", beginTurn: busy, inspectSession: busy }),
+  }).start();
+  try {
+    const descriptor = server.descriptor();
+    for (const [path, body] of [
+      ["turn/start", { traceId: "waiting_smoke_turn", helperPid: process.pid }],
+      ["session/inspect", { detectCapabilities: false }],
+    ]) {
+      const response = await fetch(`${descriptor.endpoint}/v1/${path}`, {
+        method: "POST", headers: { authorization: `Bearer ${descriptor.token}`, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      assert.equal(response.status, 503);
+      assert.equal((await response.json()).code, "browser_smoke_test_busy");
+    }
+  } finally { await server.close(); }
+});
+
 test("browser control server authenticates and owns turn visibility", async () => {
   const calls = [];
   const logs = [];
@@ -327,7 +349,7 @@ test("manual-to-automatic transaction exposes capability inspection and preserve
       inspections += 1;
       assert.equal(detectCapabilities, true);
       assert.equal(host.browserInteractionMode(), "automatic");
-      return { authenticated: true, temporary: true, url: "https://chatgpt.com/" };
+      return { authenticated: true, regular: true, url: "https://chatgpt.com/" };
     },
     removeTurnTab(tab, abortRunning) {
       assert.equal(abortRunning, false);

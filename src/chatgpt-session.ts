@@ -1,7 +1,7 @@
 import type { Locator, Page } from "playwright-core";
 import type { ChatGptWebAccountCapabilities } from "./chatgpt-web-models";
 
-export const CHATGPT_TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
+export const CHATGPT_REGULAR_CHAT_URL = "https://chatgpt.com/";
 export const CHATGPT_COMPOSER_SELECTOR = [
   '[data-testid="prompt-textarea"]',
   "#prompt-textarea",
@@ -168,11 +168,22 @@ export async function assertAuthenticatedChatGptPage(page: Page): Promise<void> 
   }
 }
 
-export async function assertTemporaryChatPage(page: Page): Promise<void> {
-  const url = new URL(page.url());
-  const expected = new URL(CHATGPT_TEMPORARY_CHAT_URL);
-  if (url.origin !== expected.origin || url.pathname !== expected.pathname || url.searchParams.get("temporary-chat") !== "true") {
-    throw new Error(`ChatGPT left the isolated Temporary Chat surface (${page.url()})`);
+// ADR-0004: fresh chats start at /; saved, task-bound conversations move to /c/<id>.
+export function isRegularChatUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.origin === new URL(CHATGPT_REGULAR_CHAT_URL).origin
+      && (url.pathname === "/" || /^\/c\/[^/]+$/.test(url.pathname))
+      && !url.searchParams.has("temporary-chat");
+  } catch {
+    return false;
+  }
+}
+
+export async function assertRegularChatPage(page: Page): Promise<void> {
+  if (!isRegularChatUrl(page.url())) {
+    throw new Error("ChatGPT is not on a regular chat surface. Start a new Codex task after updating the launcher; "
+      + "existing Temporary Chats cannot be converted or replayed automatically.");
   }
 }
 

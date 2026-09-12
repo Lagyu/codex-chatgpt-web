@@ -24,7 +24,7 @@
 
 Free 和 Go 账户会在 Codex 原生模型选择器中看到 **ChatGPT Web — Luna**。具有推理选择器的
 账户仍会按订阅权限看到 **Instant**、**Medium**、**High**、**Extra High** 和 **Pro**。
-桥接程序会把当前编译后的 Codex 任务上下文发送到一个全新的 ChatGPT 临时聊天，附加图片，
+桥接程序会把当前编译后的 Codex 任务上下文发送到一个全新的 ChatGPT 普通聊天，附加图片，
 并将可见的推理过程、工具活动和 Markdown 流式传回同一个 Codex 任务。
 
 <p align="center">
@@ -38,12 +38,12 @@ Codex task ──Responses + SSE──▶ codex-chatgpt-web ──embedded brows
 ```
 
 Codex 会保留原生任务、上下文生命周期、界面和工具 harness。本地 Responses 桥接程序只会将
-所选模型的任务转发到与该任务绑定的 ChatGPT 临时聊天；在完整模式下，MCP 会把 ChatGPT 连接回
+所选模型的任务转发到与该任务绑定的 ChatGPT 普通聊天；在完整模式下，MCP 会把 ChatGPT 连接回
 同一个 Codex 任务的工具。Pro 保留 ChatGPT 会话，不使用 Codex 上下文压缩；其他 effort 保持原有的上下文生命周期。
 
 ## Pro 会话保留版本
 
-此定制版本（`5.0.7-pro-context.1`）让自动 Pro 和 Zero Risk Pro 在每个原生 Codex 轮次中只发送一条
+此定制版本（`5.0.7-pro-context.3`）让自动 Pro 和 Zero Risk Pro 在每个原生 Codex 轮次中只发送一条
 新的用户消息。第一条消息包含任务的初始指令，后续消息只包含新输入。所有本地工具／MCP 调用都在
 该轮次的同一个 ChatGPT 助手响应内完成。Pro 禁用 Codex 历史重放、上下文重建、压缩、自动恢复、
 分段传输及暂存消息；即使启用 Bigger Context 也不例外。
@@ -69,7 +69,7 @@ Codex 会保留原生任务、上下文生命周期、界面和工具 harness。
   上下文生命周期、流式输出、追踪和工具展示。
 - **通过 MCP 使用完整 Codex harness。** 完整模式支持登录账户公开的全部 effort（包括 Pro），
   并可访问当前任务的文件系统、shell、图片、审批以及已配置的工具和应用。
-- **连续任务会话与原生上下文压缩。** 连续消息会复用同一个与任务绑定的临时聊天。对于非 Pro 模型，到达上下文
+- **连续任务会话与原生上下文压缩。** 连续消息会复用同一个与任务绑定的普通聊天。对于非 Pro 模型，到达上下文
   边界时，保留的 agent 会先写出检查点，再由 Codex 从干净聊天继续；若该私有聊天已被关闭，
   则使用 Codex 的规范任务历史作为回退来源。
 - **统一的跨平台启动器。** macOS、Windows 和 Linux 应用统一管理登录、模型设置、MCP 指南、
@@ -77,9 +77,12 @@ Codex 会保留原生任务、上下文生命周期、界面和工具 harness。
 - **故障时明确失败。** 模型、工具缺失或 ChatGPT UI 发生变化时会返回明确错误，而不会静默切换
   路由或能力。端到端覆盖范围记录在[发布验证](docs/release-validation.md)中。
 
-临时聊天是 ChatGPT 的隐私模式，并不代表匿名或仅在本地推理：提示仍会由 OpenAI 处理，并受账户
-设置及 OpenAI [临时聊天政策](https://help.openai.com/en/articles/8914046-temporary-chat-faq)
-约束。本项目为非官方项目；用户仍需自行遵守适用的 OpenAI 条款和工作区政策。
+此版本始终打开普通聊天，不更改账户的个性化设置。聊天使用现有的历史记录设置，提示仍由 OpenAI 处理。
+本项目为非官方项目；用户仍需自行遵守适用的 OpenAI 条款和工作区政策。
+
+即使推理面板已折叠，检测到 **Thinking failed** 也会立即以明确错误结束本轮，且不会自动重发。
+改用普通聊天是用户要求的实验，尚未证明能解决 ChatGPT 本身的失败。
+参见[普通聊天策略](docs/adr/0004-regular-chats.md)和[失败检测](docs/adr/0005-thinking-failed.md)。
 
 ## 快速开始
 
@@ -211,7 +214,7 @@ bun run app:package
 Codex。可选的完整模式只会启动并监管隔离的 DEV MCP tunnel，并使用独立连接器名称
 `Codex Native2 DEV`。
 
-`dev:chat` 是一个具名、持久的合成外层 Codex harness。它通过隔离的启动器浏览器、临时聊天、
+`dev:chat` 是一个具名、持久的合成外层 Codex harness。它通过隔离的启动器浏览器、普通聊天、
 prompt compiler、Responses parser 和压缩处理器执行当前工作树。可选的完整模式也会测试 MCP
 连接器和 broker；工具效果会显示为明确的模拟回执。仅浏览器聊天不会暴露外层工具。该命令不会
 打开 Responses listener、修改 `openai_base_url`、停止正式 daemon，也不会占用 17841 端口。

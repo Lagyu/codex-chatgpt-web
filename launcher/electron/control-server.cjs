@@ -317,7 +317,8 @@ class BrowserControlServer {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.logger.warn("browser.control_rejected", { message });
+      const smokeBusy = error?.code === "browser_smoke_test_busy";
+      if (!smokeBusy) this.logger.warn("browser.control_rejected", { message });
       const cancelled = error?.code === "turn_cancelled";
       const retainedUnavailable = error?.code === "retained_conversation_unavailable";
       const manualInspectionDisabled = error?.code === "manual_browser_inspection_disabled";
@@ -327,9 +328,10 @@ class BrowserControlServer {
         response,
         cancelled || retainedUnavailable || manualInspectionDisabled || manualOwnerLost
           ? 409
-          : manualTimedOut ? 408 : 400,
+          : manualTimedOut ? 408 : smokeBusy ? 503 : 400,
         {
         error: message,
+        ...(smokeBusy ? { code: "browser_smoke_test_busy" } : {}),
         ...(cancelled ? { code: "turn_cancelled" } : {}),
         ...(retainedUnavailable ? { code: "retained_conversation_unavailable" } : {}),
         ...(manualInspectionDisabled ? { code: "manual_browser_inspection_disabled" } : {}),

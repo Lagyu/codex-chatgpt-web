@@ -40,7 +40,7 @@ launcher-owned codex-chatgpt-web daemon
 - Exposes Instant (`chatgpt-web/light`), Medium, High, and Extra High; each model advertises exactly one
   immutable Codex effort matching its ChatGPT browser mode. `chatgpt-web/pro` is appended only when
   the authenticated account exposes Pro.
-- Sends the complete Codex context and image attachments to a fresh ChatGPT Temporary Chat.
+- Sends the complete Codex context and image attachments to a fresh ChatGPT regular chat.
 - Never starts the broker, tunnel, or MCP server.
 - Emits a nonfatal Codex commentary warning that local tools are unavailable for the selected model.
 
@@ -102,7 +102,7 @@ tabs. Each task/model/effort/compaction epoch owns one exact `WebContentsView` l
 native messages reuse that surface, while each message receives a fresh turn-bound MCP token and
 keeps all of its MCP tool rounds inside one ChatGPT response. Compaction asks the same retained Web
 agent for a one-shot structured checkpoint, waits for the response and physical helper cleanup,
-then closes the old surface. The next epoch gets a new Temporary Chat. Model messages never copy
+then closes the old surface. The next epoch gets a new regular chat. Model messages never copy
 state between tabs. Tabs share only the local login
 partition and keep independent documents and lifecycles. Closing a running tab destroys its page
 and terminates that browser turn. A sixth concurrent turn fails explicitly; the cap avoids excessive
@@ -117,7 +117,7 @@ logical identities fail explicitly; accepted messages are never resent to repair
 Sign-in uses that same persistent Electron partition. ChatGPT login pages and allowed identity-
 provider popups are adopted into a temporary `WebContentsView` inside the launcher instead of being
 redirected to another browser. After the provider returns to ChatGPT, the launcher requires both a
-server-authenticated session and the Temporary Chat composer in the primary owned view, then closes
+server-authenticated session and the regular chat composer in the primary owned view, then closes
 the temporary auth view. There is no browser-profile handoff, cookie import, CDP login port, or
 temporary session-transfer directory.
 
@@ -161,8 +161,8 @@ environment. Zero Risk always advertises a fixed three-times compaction interval
 Bigger Context multipart transport. At that boundary its active ChatGPT response receives the
 checkpoint instruction as an MCP result, returns the compacted context through its bound completion
 control, and ends. The old manual chat is retired; the next compacted Codex request owns a fresh
-Temporary Chat and its locally compiled prompt is copied to the clipboard. A missing Automatic
-retained source falls back to a dedicated read-only Temporary Chat built from canonical Codex
+regular chat and its locally compiled prompt is copied to the clipboard. A missing Automatic
+retained source falls back to a dedicated read-only regular chat built from canonical Codex
 history; a missing Zero Risk source uses the same explicit manual checkpoint contract. An invalid or
 ambiguous handoff still fails explicitly. Browser-only mode
 uses the same read-only summarization path, then returns the native replacement-history shape expected

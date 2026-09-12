@@ -25,6 +25,63 @@ import type { Browser, BrowserContext, Page } from "playwright-core";
 
 const roots: string[] = [];
 
+test.each(["turn", "inspection"])("%s admission waits for an explicitly busy smoke test without changing request identity", async kind => {
+  const bodies: unknown[] = [];
+  const server = createServer(async (request, response) => {
+    let body = "";
+    for await (const chunk of request) body += chunk;
+    bodies.push(JSON.parse(body));
+    response.setHeader("content-type", "application/json");
+    if (bodies.length === 1) {
+      response.writeHead(503);
+      response.end(JSON.stringify({ code: "browser_smoke_test_busy", error: "smoke is running" }));
+    } else {
+      response.end(JSON.stringify(kind === "inspection"
+        ? { authenticated: true, regular: true, url: "https://chatgpt.com/" }
+        : { surfaceId: "launcher_surface_id_0123456789AB", reused: true, connectorBound: true }));
+    }
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("no test port");
+    const path = descriptorFile(`http://127.0.0.1:${address.port}`);
+    if (kind === "inspection") await inspectLauncherBrowserHost(path);
+    else await notifyLauncherTurn(path, {
+      phase: "start", traceId: "smoke_wait_fixture", helperPid: process.pid,
+      conversationKey: "a".repeat(64), connectorIdentity: "Codex Native2", requireRetainedConversation: true,
+    });
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toEqual(bodies[1]);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
+test("a cancelled turn waiting behind smoke never sends another lease request", async () => {
+  const controller = new AbortController();
+  let calls = 0;
+  const server = createServer((_request, response) => {
+    calls++;
+    response.writeHead(503, { "content-type": "application/json" });
+    response.end(JSON.stringify({ code: "browser_smoke_test_busy" }));
+    setTimeout(() => controller.abort(), 25);
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("no test port");
+    await expect(notifyLauncherTurn(descriptorFile(`http://127.0.0.1:${address.port}`), {
+      phase: "start", traceId: "cancelled_smoke_wait", helperPid: process.pid,
+    }, undefined, controller.signal)).rejects.toMatchObject({ name: "AbortError" });
+    expect(calls).toBe(1);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
@@ -253,10 +310,10 @@ test("launcher session verification uses the authenticated control channel inste
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({
       authenticated: true,
-      temporary: true,
+      regular: true,
       solAvailable: true,
       proAvailable: true,
-      url: "https://chatgpt.com/?temporary-chat=true",
+      url: "https://chatgpt.com/",
     }));
   });
   await new Promise<void>((resolve, reject) => {
@@ -270,7 +327,7 @@ test("launcher session verification uses the authenticated control channel inste
     expect(await inspectLauncherBrowserHost(path, { detectCapabilities: true })).toEqual({
       solAvailable: true,
       proAvailable: true,
-      url: "https://chatgpt.com/?temporary-chat=true",
+      url: "https://chatgpt.com/",
     });
   } finally {
     await new Promise<void>(resolve => server.close(() => resolve()));
@@ -369,7 +426,7 @@ function nativeTargetContext(pages: Page[], targetId: (page: Page) => string): B
 test("launcher page selection uses native ownership without evaluating unrelated renderers", async () => {
   const descriptor = readLauncherBrowserHostDescriptor(descriptorFile());
   const hiddenPage = {
-    url: () => "https://chatgpt.com/?temporary-chat=true",
+    url: () => "https://chatgpt.com/",
     evaluate: () => { throw new Error("Do not evaluate an unrelated renderer"); },
   } as unknown as Page;
   const ownedPage = {

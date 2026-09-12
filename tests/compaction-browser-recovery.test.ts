@@ -16,7 +16,7 @@ test.each([[true, false, true], [false, false, true], [true, true, true], [true,
   const sendBudgets: number[] = [];
   let stage = "";
   let released = false;
-  const page = { evaluate: async () => ({}), isClosed: () => false };
+  const page = { url: () => "https://chatgpt.com/c/retained-fixture", evaluate: async () => ({}), isClosed: () => false };
   const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
     config: { appName: "Codex Native2", browserDiagnosticsPath: diagnostics, ...(owned ? { browserHostDescriptorPath: "owned-descriptor" } : {}) },
     runStage: async (_trace: string, name: string, timeout: number, action: (signal: AbortSignal) => Promise<unknown>) => {
@@ -24,7 +24,7 @@ test.each([[true, false, true], [false, false, true], [true, true, true], [true,
       if (name === "send" || name.endsWith("_send")) sendBudgets.push(timeout);
       return action(new AbortController().signal);
     },
-    prepareTemporaryChatSurface: async () => {},
+    prepareRegularChatSurface: async () => {},
     selectModelAndEffort: async (_page: unknown, model: string, effort: string) => {
       actions.push(`effort:${effort}`);
       return resolveChatGptWebModelMode(model, effort, capabilities);
