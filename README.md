@@ -45,18 +45,24 @@ without Codex compaction; other efforts retain their existing context lifecycle.
 
 ## Pro retained-context build
 
-This custom build (`5.0.7-pro-context.3`) sends one new user message per native Codex turn for
+This custom build (`5.0.7-pro-context.4`) normally sends one new user message per native Codex turn for
 automatic Pro and Zero Risk Pro. The first message includes the task's initial instructions;
 later messages contain only the new input. All local-tool/MCP rounds stay inside that turn's
-single ChatGPT assistant response. Codex history replay, reconstruction, compaction, automatic
-recovery, multipart transport, and staging are disabled for Pro, including with Bigger Context on.
+single ChatGPT assistant response, except for the failure continuation described below.
+Codex history replay, reconstruction, compaction, restart recovery, multipart transport, and staging
+are disabled for Pro, including with Bigger Context on.
 
 Regular chats are used for automatic and manual tasks, login, and verification. The bridge does
-not toggle personalization. A visible **Thinking failed** status ends the turn with an explicit
-error, including when its reasoning panel is collapsed. It never automatically replays that turn.
+not toggle personalization. A visible **Thinking failed** status is detected even with its panel
+collapsed. For an automatic task, a failed response lasting **strictly more than 60 minutes** may
+receive a short continuation in the same conversation after outstanding tools settle. The timer
+resets on each accepted continuation; a subsequent failure at or below 60 minutes stops with an
+explicit error. Original prompts, history, and tool calls are never replayed. Manual Zero Risk,
+maintenance, staging, compaction, and Luna checkpoint capture do not automatically continue.
 Switching chat mode is an operator-requested experiment; it is not a proven fix for ChatGPT's
 underlying failure. See [regular chat policy](docs/adr/0004-regular-chats.md) and
-[terminal failure detection](docs/adr/0005-thinking-failed.md).
+[failure detection](docs/adr/0005-thinking-failed.md) and
+[long-response continuation](docs/adr/0007-thinking-failure-continuation.md).
 
 Start a new Codex task after installing and restarting the Launcher and Codex. Keep the task's
 ChatGPT tab open. A missing chat or lost in-flight response produces an explicit error; it cannot

@@ -1,6 +1,6 @@
 # ADR-0005: Treat explicit Thinking failed status as terminal
 
-Date: 2026-09-13. Status: Accepted.
+Date: 2026-09-13. Status: Accepted; continuation policy amended by ADR-0007.
 
 ## Context and observed evidence
 
@@ -51,3 +51,11 @@ observed structural evidence require separate evidence and regression coverage.
 
 Governing code: `src/adapters/chatgpt-web/adapter-error.ts` and
 `src/adapters/chatgpt-web/browser-worker.ts`. Tests: `tests/regular-chat-and-failure.test.ts`.
+
+## Decision history
+
+The original `.3` behavior above remains the fallback. On 2026-09-13 the operator explicitly
+authorized [ADR-0007](0007-thinking-failure-continuation.md): a confirmed failure after strictly
+more than 60 minutes may continue in place. Existing authorized tool batches may settle once
+before that continuation; old capabilities are retired. Ineligible failures still stop with
+`chatgpt_thinking_failed`, and original prompts and tool requests are never replayed.

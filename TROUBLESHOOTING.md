@@ -19,6 +19,24 @@ editing Codex configuration, or opening a new issue.
 Do not repeatedly press setup actions after they report success. The exact error and a fresh safe
 log are more useful than another reinstall.
 
+## Thinking failed after a long response
+
+In the custom `5.0.7-pro-context.4` build, an automatic response that shows **Thinking failed**
+strictly more than 60 minutes after accepted submission can continue in the same retained chat.
+The launcher first waits up to two minutes for outstanding tools to settle. It then submits one
+short instruction to check completed work and continue the original task. Each accepted
+continuation starts a new timer, so an immediate or short failure cannot repeat this cycle.
+
+The continuation can use another ChatGPT turn. There is no total attempt cap: every further
+continuation independently requires another response longer than an hour. It does not recover
+hidden reasoning or reconstruct history. Cancellation, changed or lost conversations, unsettled
+tools, uncertain submission, and other errors stop the task. Manual Zero Risk, smoke tests,
+compaction, multipart requests, and Luna checkpoint capture remain outside this policy.
+
+The log records `responseElapsedMs` at eligibility and `continuation accepted` after submission.
+The elapsed time ends at detection; it cannot establish an earlier upstream failure timestamp
+when the browser was unobservable. See [ADR-0007](docs/adr/0007-thinking-failure-continuation.md).
+
 ## Models do not appear, or setup remains on step 3
 
 **Install models** updates the Codex route, but a running Codex process keeps its old model catalog.

@@ -16,6 +16,7 @@ import type { AdapterEvent, CodexParsedRequest, CodexProviderConfig } from "../s
 import { defaultConfig, providerConfig } from "../src/config";
 import { responseRequest } from "../src/server";
 import { expandPreviousResponseInput } from "../src/responses/state";
+import { THINKING_FAILURE_MIN_RESPONSE_MS } from "../src/adapters/chatgpt-web/thinking-failure-continuation";
 
 const root = mkdtempSync(join(tmpdir(), "cgw-pro-context-"));
 const capabilities = { localToolsEnabled: true, proAvailable: true, solAvailable: true };
@@ -203,6 +204,81 @@ test("multiple MCP rounds with history-free Responses deltas stay in one Pro ass
     worker.run = original;
     chatGptTurnSessions.clear();
     await TurnBroker.forSocket(socket).close();
+  }
+}, 20_000);
+
+test("long failed Pro response continues through the same native owner without replaying a prompt or tool", async () => {
+  const config = provider("continued");
+  const socket = config.chatgptWeb!.brokerSocketPath!;
+  const broker = TurnBroker.forSocket(socket);
+  const worker = ChatGptBrowserWorker.forProvider(config);
+  const original = worker.run;
+  let browserRuns = 0;
+  const prompts: string[] = [];
+  const executed: string[] = [];
+  worker.run = async turn => {
+    browserRuns += 1;
+    const prepared = await turn.prepare();
+    prompts.push(prepared.text);
+    const owner = prepared.text.match(/turn_token (turn_[A-Za-z0-9_-]+)/)![1]!;
+    prepared.release();
+    let token = owner;
+    for (let response = 0; response < 2; response += 1) {
+      const claim = await callTurnBroker<{ bindingId: string; activityId: string }>(socket, { method: "claim", token });
+      const progress = turn.externalProgress!;
+      const previous = progress.snapshot().lastToolBatchRevision;
+      const invocation = callTurnBroker<BrokerToolResult>(socket, {
+        method: "invoke", bindingId: claim.bindingId, wireName: "exec_command",
+        arguments: { cmd: response === 0 ? "original-action" : "inspect-and-finish", workdir: root },
+      }, 10_000);
+      let snapshot = progress.snapshot();
+      while (snapshot.lastToolBatchRevision <= previous) snapshot = await progress.waitForChange(snapshot.revision, turn.abortSignal);
+      await progress.acknowledgeToolBatch(snapshot.lastToolBatchRevision);
+      expect((await invocation).structuredContent).toMatchObject({ exit_code: 0 });
+      await callTurnBroker(socket, { method: "activity_complete", token, activityId: claim.activityId });
+      if (response === 0) {
+        const continuation = await turn.prepareThinkingFailureContinuation!({
+          responseIdentity: "long-failed-response", elapsedMs: THINKING_FAILURE_MIN_RESPONSE_MS + 1,
+          revision: await turn.completionFence!.begin(),
+        });
+        expect(continuation).toBeDefined();
+        prompts.push(continuation!);
+        token = continuation!.match(/turn_[A-Za-z0-9_-]{24,}/)![0]!;
+        expect(token).not.toBe(owner);
+        await expect(callTurnBroker(socket, { method: "claim", token: owner })).rejects.toThrow("has already finished");
+      }
+    }
+    turn.onTextDelta("Completed after continuing the long failed response.");
+    return "Completed after continuing the long failed response.";
+  };
+  const first = request("continuation");
+  let current = first;
+  try {
+    for (let round = 0; round < 3; round += 1) {
+      const events: AdapterEvent[] = [];
+      await createChatGptWebAdapter(config).runTurn!(current, { headers: new Headers() }, event => events.push(event));
+      detachMockRelease(config, first);
+      expect(events.at(-1)).toMatchObject({ type: "done", endTurn: round === 2 });
+      if (round === 2) break;
+      const call = events.find((event): event is Extract<AdapterEvent, { type: "tool_call_start" }> => event.type === "tool_call_start")!;
+      const args = events.filter((event): event is Extract<AdapterEvent, { type: "tool_call_delta" }> => event.type === "tool_call_delta");
+      executed.push(JSON.stringify({ call, args }));
+      current = parseRequest({ ...(first._rawBody as object), previous_response_id: `uncached-continued-${round}`,
+        input: [{ type: "function_call_output", call_id: call.id, output: JSON.stringify({ output: "TOOL_RESULT_NO_REPLAY", exit_code: 0 }) }],
+      });
+    }
+    expect(browserRuns).toBe(1);
+    expect(prompts).toHaveLength(2);
+    expect(executed).toHaveLength(2);
+    expect(executed[0]).toContain("original-action");
+    expect(executed[1]).toContain("inspect-and-finish");
+    for (const old of ["INITIAL_SYSTEM_INSTRUCTIONS", "INITIAL_DEVELOPER_INSTRUCTIONS", "NEW_USER_INSTRUCTION", "TOOL_RESULT_NO_REPLAY"]) {
+      expect(prompts[1]).not.toContain(old);
+    }
+  } finally {
+    worker.run = original;
+    chatGptTurnSessions.clear();
+    await broker.close();
   }
 }, 20_000);
 

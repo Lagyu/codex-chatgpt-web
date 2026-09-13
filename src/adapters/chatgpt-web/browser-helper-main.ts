@@ -9,6 +9,7 @@ import { createBrowserHelperPromptSelection } from "./browser-helper-prompt-sele
 import type { CompiledChatGptWebPrompt } from "./prompt";
 import { ChatGptMirroredTurnProgress } from "./turn-progress";
 import type { ChatGptExternalTurnProgressSnapshot } from "./turn-progress";
+import { assertThinkingFailureContinuationRequest } from "./thinking-failure-continuation";
 
 interface RunMessage {
   type: "run";
@@ -33,6 +34,7 @@ interface RunMessage {
     compaction?: boolean;
     captureLunaCheckpoint?: boolean;
     externalProgress?: boolean;
+    thinkingContinuation?: boolean;
   };
 }
 
@@ -65,6 +67,7 @@ type InputMessage = RunMessage
   | { type: "send_activation_ack"; id: string }
   | { type: "completion_fence_begin_ack"; id: string; requestId: number; revision: number | null }
   | { type: "completion_fence_commit_ack"; id: string; requestId: number; committed: boolean }
+  | { type: "thinking_continuation_ack"; id: string; requestId: number; text: string | null }
   | { type: "progress"; id: string; snapshot: ChatGptExternalTurnProgressSnapshot }
   | { type: "abort"; id: string; reason?: "compaction_handoff_accepted" }
   | { type: "shutdown" };
@@ -104,6 +107,11 @@ const completionFenceCommitWaiters = new Map<string, {
   resolve: (committed: boolean) => void;
   reject: (error: Error) => void;
 }>();
+const thinkingContinuationWaiters = new Map<string, {
+  requestId: number;
+  resolve: (text: string | undefined) => void;
+  reject: (error: Error) => void;
+}>();
 let completionFenceRequestId = 0;
 let shuttingDown = false;
 let shutdownPromise: Promise<void> | undefined;
@@ -132,6 +140,10 @@ function requestShutdown(): Promise<void> {
     waiter.reject(new DOMException("Browser helper is shutting down", "AbortError"));
   }
   completionFenceCommitWaiters.clear();
+  for (const waiter of thinkingContinuationWaiters.values()) {
+    waiter.reject(new DOMException("Browser helper is shutting down", "AbortError"));
+  }
+  thinkingContinuationWaiters.clear();
   input.close();
   void closeChatGptBrowserWorkers().then(
     () => {
@@ -177,6 +189,9 @@ async function run(message: RunMessage): Promise<void> {
   if (message.turn.externalProgress !== undefined && typeof message.turn.externalProgress !== "boolean") {
     throw new Error("Browser helper external progress flag is invalid");
   }
+  if (message.turn.thinkingContinuation !== undefined && typeof message.turn.thinkingContinuation !== "boolean") {
+    throw new Error("Browser helper Thinking failed continuation flag is invalid");
+  }
   const provider: CodexProviderConfig = {
     adapter: "chatgpt-web",
     baseUrl: "https://chatgpt.com",
@@ -214,6 +229,22 @@ async function run(message: RunMessage): Promise<void> {
     ...(message.turn.nativeConnector ? { nativeConnector: true } : {}),
     prepare: prepareSelected,
     ...(message.turn.resumeAvailable ? { prepareResume: prepareSelected } : {}),
+    ...(message.turn.thinkingContinuation ? {
+      prepareThinkingFailureContinuation: request => new Promise<string | undefined>((resolve, reject) => {
+        assertThinkingFailureContinuationRequest(request);
+        abortController.signal.throwIfAborted();
+        if (thinkingContinuationWaiters.has(message.id)) {
+          reject(new Error("Browser helper already awaits a continuation prompt"));
+          return;
+        }
+        const requestId = ++completionFenceRequestId;
+        thinkingContinuationWaiters.set(message.id, { requestId, resolve, reject });
+        if (!writeProtocol({ type: "event", id: message.id, event: "thinking_continuation", requestId, request })) {
+          thinkingContinuationWaiters.delete(message.id);
+          reject(new Error("Browser helper could not prepare a continuation"));
+        }
+      }),
+    } : {}),
     ...(message.turn.retainConversation ? { retainConversation: true } : {}),
     ...(message.turn.requireRetainedConversation ? { requireRetainedConversation: true } : {}),
     ...(message.turn.conversationKey ? { conversationKey: message.turn.conversationKey } : {}),
@@ -325,6 +356,9 @@ async function run(message: RunMessage): Promise<void> {
     const commitWaiter = completionFenceCommitWaiters.get(message.id);
     completionFenceCommitWaiters.delete(message.id);
     commitWaiter?.reject(new DOMException("Browser helper turn ended before completion-fence commit", "AbortError"));
+    const continuationWaiter = thinkingContinuationWaiters.get(message.id);
+    thinkingContinuationWaiters.delete(message.id);
+    continuationWaiter?.reject(new DOMException("Browser helper turn ended before continuation", "AbortError"));
     abortControllers.delete(message.id);
     turnProgress.delete(message.id);
   }
@@ -446,6 +480,17 @@ input.on("line", line => {
     if (!waiter || waiter.requestId !== message.requestId) return;
     completionFenceCommitWaiters.delete(message.id);
     waiter.resolve(message.committed);
+  } else if (message.type === "thinking_continuation_ack") {
+    if (!Number.isSafeInteger(message.requestId) || message.requestId <= 0
+      || (message.text !== null && (typeof message.text !== "string" || !message.text.trim()))) {
+      writeProtocol({ type: "error", id: message.id, message: "Browser helper continuation prompt is invalid" });
+      abortControllers.get(message.id)?.abort();
+      return;
+    }
+    const waiter = thinkingContinuationWaiters.get(message.id);
+    if (!waiter || waiter.requestId !== message.requestId) return;
+    thinkingContinuationWaiters.delete(message.id);
+    waiter.resolve(message.text ?? undefined);
   } else if (message.type === "progress") {
     // Progress is meaningful only for a turn this helper is currently running. Ignore every other
     // id so the mirror map remains owned by active turn lifecycles.
@@ -476,6 +521,9 @@ input.on("line", line => {
     const commitWaiter = completionFenceCommitWaiters.get(message.id);
     completionFenceCommitWaiters.delete(message.id);
     commitWaiter?.reject(new DOMException("Browser helper turn aborted before completion-fence commit", "AbortError"));
+    const continuationWaiter = thinkingContinuationWaiters.get(message.id);
+    thinkingContinuationWaiters.delete(message.id);
+    continuationWaiter?.reject(new DOMException("Browser helper turn aborted before continuation", "AbortError"));
   }
   else if (message.type === "shutdown") {
     void requestShutdown();
@@ -517,4 +565,4 @@ process.once("SIGTERM", () => {
 });
 
 // Advertise the optional frames this helper understands so the daemon can negotiate them explicitly.
-writeProtocol({ type: "ready", features: ["progress", "tool-boundary-ack", "completion-fence", "multipart-stage-ack"] });
+writeProtocol({ type: "ready", features: ["progress", "tool-boundary-ack", "completion-fence", "multipart-stage-ack", "thinking-continuation"] });

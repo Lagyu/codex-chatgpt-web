@@ -43,9 +43,10 @@ Codex 会保留原生任务、上下文生命周期、界面和工具 harness。
 
 ## Pro 会话保留版本
 
-此定制版本（`5.0.7-pro-context.3`）让自动 Pro 和 Zero Risk Pro 在每个原生 Codex 轮次中只发送一条
+此定制版本（`5.0.7-pro-context.4`）让自动 Pro 和 Zero Risk Pro 通常在每个原生 Codex 轮次中发送一条
 新的用户消息。第一条消息包含任务的初始指令，后续消息只包含新输入。所有本地工具／MCP 调用都在
-该轮次的同一个 ChatGPT 助手响应内完成。Pro 禁用 Codex 历史重放、上下文重建、压缩、自动恢复、
+该轮次的同一个 ChatGPT 助手响应内完成，唯一例外是下述长时间响应失败后的继续操作。
+Pro 禁用 Codex 历史重放、上下文重建、压缩、重启后的自动恢复、
 分段传输及暂存消息；即使启用 Bigger Context 也不例外。
 
 安装后重启 Launcher 和 Codex，并开始新的 Codex 任务。请保持任务的 ChatGPT 标签页打开。
@@ -80,9 +81,13 @@ Codex 会保留原生任务、上下文生命周期、界面和工具 harness。
 此版本始终打开普通聊天，不更改账户的个性化设置。聊天使用现有的历史记录设置，提示仍由 OpenAI 处理。
 本项目为非官方项目；用户仍需自行遵守适用的 OpenAI 条款和工作区政策。
 
-即使推理面板已折叠，检测到 **Thinking failed** 也会立即以明确错误结束本轮，且不会自动重发。
+即使推理面板已折叠，也能检测 **Thinking failed**。自动任务中，只有失败的响应持续时间
+**严格超过 60 分钟**，才会在未完成的工具调用结束后，向同一会话发送简短的继续指令。
+每次继续消息被接受后都会重新计时；之后的响应若在 60 分钟以内失败，则明确报错并停止。
+原始提示、历史和工具调用不会重放。手动 Zero Risk、维护、暂存、压缩和 Luna 检查点捕获不自动继续。
 改用普通聊天是用户要求的实验，尚未证明能解决 ChatGPT 本身的失败。
-参见[普通聊天策略](docs/adr/0004-regular-chats.md)和[失败检测](docs/adr/0005-thinking-failed.md)。
+参见[普通聊天策略](docs/adr/0004-regular-chats.md)、[失败检测](docs/adr/0005-thinking-failed.md)
+和[长时间响应继续策略](docs/adr/0007-thinking-failure-continuation.md)。
 
 ## 快速开始
 

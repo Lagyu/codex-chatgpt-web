@@ -139,3 +139,7 @@ live-service check; replacing the running application is not part of producing t
   [regressions](../../tests/pro-context.test.ts), [launcher tests](../../launcher/tests/browser-host.test.cjs).
 
 History: initial decision introduced in `5.0.7-pro-context.1`; no earlier decision superseded.
+On 2026-09-13, the operator authorized [ADR-0007](0007-thinking-failure-continuation.md), an exception
+to the one-Web-response constraint: after explicit Thinking failed on a response longer than
+60 minutes, the still-live owner may send a short continuation in the same retained chat. All
+history-replay, restart-tombstone, compaction and staging restrictions above remain in force.

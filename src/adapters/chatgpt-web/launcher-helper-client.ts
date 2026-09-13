@@ -6,6 +6,7 @@ import { notifyLauncherTurn, readLauncherBrowserHostDescriptor } from "../../lau
 import { ChatGptCompactionHandoffAccepted, ChatGptWebAdapterError } from "./adapter-error";
 import type { CompiledChatGptWebPrompt } from "./prompt";
 import type { BrowserTurn, ResolvedBrowserConfig } from "./browser-worker";
+import { assertThinkingFailureContinuationRequest, type ThinkingFailureContinuationRequest } from "./thinking-failure-continuation";
 import {
   parseChatGptLunaCheckpoint,
   type ChatGptLunaCheckpoint,
@@ -21,6 +22,8 @@ interface PendingTurn {
   localFailure?: Error;
   progressForwarding?: AbortController;
   acknowledgedMultipartStage?: number;
+  thinkingContinuationInFlight?: boolean;
+  continuedResponses?: Set<string>;
 }
 
 type HelperMessage =
@@ -30,6 +33,7 @@ type HelperMessage =
   | { type: "event"; id: string; event: "multipart_stage_acknowledged"; stageIndex: number }
   | { type: "event"; id: string; event: "completion_fence_begin"; requestId: number }
   | { type: "event"; id: string; event: "completion_fence_commit"; requestId: number; revision: number }
+  | { type: "event"; id: string; event: "thinking_continuation"; requestId: number; request: ThinkingFailureContinuationRequest }
   | { type: "event"; id: string; event: "prepared_selected"; reused: boolean }
   | { type: "event"; id: string; event: "luna_checkpoint"; checkpoint: ChatGptLunaCheckpoint; answerHash: string }
   | { type: "result"; id: string; text: string }
@@ -80,6 +84,15 @@ function parseHelperMessage(line: string): HelperMessage {
         throw new Error("Launcher browser helper completion fence request id is invalid");
       }
       return { type: "event", id: message.id, event, requestId: message.requestId as number };
+    }
+    if (event === "thinking_continuation") {
+      if (!Number.isSafeInteger(message.requestId) || (message.requestId as number) <= 0
+        || !message.request || typeof message.request !== "object") {
+        throw new Error("Launcher browser helper continuation request is invalid");
+      }
+      const request = message.request as ThinkingFailureContinuationRequest;
+      assertThinkingFailureContinuationRequest(request);
+      return { type: "event", id: message.id, event, requestId: message.requestId as number, request };
     }
     if (event === "completion_fence_commit") {
       if (!Number.isSafeInteger(message.requestId) || (message.requestId as number) <= 0
@@ -291,6 +304,8 @@ export class LauncherBrowserHelperClient {
             ...(turn.compaction ? { compaction: true } : {}),
             ...(turn.captureLunaCheckpoint ? { captureLunaCheckpoint: true } : {}),
             ...(turn.externalProgress ? { externalProgress: true } : {}),
+            ...(turn.prepareThinkingFailureContinuation && this.helperFeatures.has("thinking-continuation")
+              ? { thinkingContinuation: true } : {}),
           },
         })
           // Only mirror once the run frame is on the wire, so the helper never sees progress for a
@@ -476,6 +491,26 @@ export class LauncherBrowserHelperClient {
           message.id,
           error instanceof Error ? error : new Error(String(error)),
           pending,
+        ));
+      }
+      else if (message.event === "thinking_continuation") {
+        const prepare = pending.turn.prepareThinkingFailureContinuation;
+        if (!prepare || pending.turn.compaction || pending.turn.captureLunaCheckpoint
+          || pending.thinkingContinuationInFlight || pending.continuedResponses?.has(message.request.responseIdentity)) {
+          this.abortWithLocalFailure(message.id, new Error("Unexpected or duplicate Thinking failed continuation"), pending);
+          return;
+        }
+        pending.thinkingContinuationInFlight = true;
+        void Promise.resolve().then(() => {
+          if (pending.localFailure || pending.turn.abortSignal?.aborted) return undefined;
+          return prepare(message.request);
+        }).then(text => {
+          if (this.pending.get(message.id) !== pending || pending.localFailure || pending.turn.abortSignal?.aborted) return;
+          if (text !== undefined) (pending.continuedResponses ??= new Set()).add(message.request.responseIdentity);
+          pending.thinkingContinuationInFlight = false;
+          return this.send({ type: "thinking_continuation_ack", id: message.id, requestId: message.requestId, text: text ?? null });
+        }).catch(error => this.abortWithLocalFailure(
+          message.id, error instanceof Error ? error : new Error(String(error)), pending,
         ));
       }
       else if (message.event === "send_activated") {

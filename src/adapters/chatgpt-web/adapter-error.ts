@@ -65,7 +65,7 @@ export function chatGptStoppedThinkingError(): ChatGptWebAdapterError {
 export function chatGptThinkingFailedError(): ChatGptWebAdapterError {
   return new ChatGptWebAdapterError(
     "ChatGPT displayed 'Thinking failed' and ended this response. "
-    + "The turn was not replayed automatically. Check the ChatGPT conversation before starting another turn.",
+    + "No further automatic continuation was sent. Check the ChatGPT conversation before starting another turn.",
     { status: 502, errorType: "server_error", code: "chatgpt_thinking_failed", retryable: false },
   );
 }

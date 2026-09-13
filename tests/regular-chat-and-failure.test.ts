@@ -101,18 +101,18 @@ test("previous responses, user messages, active reasoning and quoted failure phr
       <div class="markdown">Thinking failed</div><button>Investigating Thinking failed errors</button></article>`)).toBeFalse();
 });
 
-test("Thinking failed is a terminal upstream error without automatic retry or an invented cause", () => {
+test("an ineligible Thinking failed remains a non-retryable upstream error without an invented cause", () => {
   expect(chatGptThinkingFailedError()).toMatchObject({
     status: 502, errorType: "server_error", code: "chatgpt_thinking_failed", retryable: false,
   });
   expect(chatGptThinkingFailedError().message).not.toMatch(/quota|temporary|compaction/i);
 });
 
-test("both response loops check Thinking failed before acknowledging MCP progress", () => {
+test("both response loops recognize Thinking failed before the ordinary MCP observation path", () => {
   const worker = readFileSync("src/adapters/chatgpt-web/browser-worker.ts", "utf8");
   for (const method of ["private async waitForMultipartAcknowledgement(", "private async runBrowserTurn("]) {
     const loop = worker.slice(worker.indexOf(method));
-    const failure = loop.indexOf("if (snapshot.thinkingFailedVisible) throw chatGptThinkingFailedError();");
+    const failure = loop.indexOf("if (snapshot.thinkingFailedVisible)");
     expect(failure).toBeGreaterThan(0);
     expect(loop.indexOf(".acknowledgeToolBatch(", failure)).toBeGreaterThan(failure);
   }

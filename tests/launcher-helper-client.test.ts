@@ -6,11 +6,88 @@ import { ChatGptCompactionHandoffAccepted, ChatGptWebAdapterError } from "../src
 import { LauncherBrowserHelperClient } from "../src/adapters/chatgpt-web/launcher-helper-client";
 import type { BrowserTurn, ResolvedBrowserConfig } from "../src/adapters/chatgpt-web/browser-worker";
 import { LAUNCHER_BROWSER_HOST_KIND, LAUNCHER_BROWSER_IDLE_URL } from "../src/launcher-browser-host";
+import { THINKING_FAILURE_CONTINUATION_PROMPT, THINKING_FAILURE_MIN_RESPONSE_MS } from "../src/adapters/chatgpt-web/thinking-failure-continuation";
 
 const roots: string[] = [];
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
+
+for (const mode of ["continue", "duplicate", "short", "abort"] as const) {
+  test(`Thinking failed continuation crosses the real helper IPC with ${mode} handling`, async () => {
+    const root = mkdtempSync(join(tmpdir(), "cgw-helper-continue-"));
+    roots.push(root);
+    const helper = join(root, "helper.ts");
+    writeFileSync(helper, `
+      import { ChatGptBrowserWorker } from ${JSON.stringify(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url).href)};
+      ChatGptBrowserWorker.prototype.run = async turn => {
+        await turn.onPreparedSelected(false);
+        await turn.prepare();
+        await turn.onSendActivated();
+        turn.onSubmitted();
+        const request = { responseIdentity: "failed-response", elapsedMs: ${THINKING_FAILURE_MIN_RESPONSE_MS + (mode === "short" ? 0 : 1)}, revision: 7 };
+        let prompt = await turn.prepareThinkingFailureContinuation(request);
+        if (${JSON.stringify(mode)} === "continue") {
+          if (prompt !== undefined) throw new Error("Raced broker must be checked again");
+          prompt = await turn.prepareThinkingFailureContinuation({ ...request, revision: 8 });
+          if (prompt !== ${JSON.stringify(THINKING_FAILURE_CONTINUATION_PROMPT)}) throw new Error("Prompt was not preserved");
+          await turn.onSendActivated();
+          turn.onSubmitted();
+        }
+        if (${JSON.stringify(mode)} === "duplicate") await turn.prepareThinkingFailureContinuation(request);
+        turn.onTextDelta("continued answer");
+        return "continued answer";
+      };
+      await import(${JSON.stringify(new URL("../src/adapters/chatgpt-web/browser-helper-main.ts", import.meta.url).href)});
+    `, { mode: 0o700 });
+    const descriptorPath = join(root, "launcher.json");
+    writeFileSync(descriptorPath, JSON.stringify({
+      version: 3, kind: LAUNCHER_BROWSER_HOST_KIND, profile: "production", pid: process.pid,
+      endpoint: "http://127.0.0.1:39001",
+      control: { endpoint: "http://127.0.0.1:39002", token: "launcher-control-token-0123456789abcdefghijklmnop" },
+      helper: { executable: process.execPath, script: helper },
+      partition: "persist:codex-web-gpt-chatgpt", idleUrl: LAUNCHER_BROWSER_IDLE_URL,
+      surfaceId: "launcher_surface_id_0123456789AB",
+      surfaceTargets: { launcher_surface_id_0123456789AB: "native-owned-target" },
+      createdAt: new Date().toISOString(),
+    }), { mode: 0o600 });
+    const client = new LauncherBrowserHelperClient({
+      appName: "Codex Native2", browserHost: "launcher", browserHostDescriptorPath: descriptorPath,
+      browserHelperScriptPath: helper, storageStatePath: join(root, "unused-state.json"),
+      chromeExecutablePath: join(root, "unused-chrome"), turnTimeoutMs: 60_000,
+      headed: true, autoApproveToolCalls: false,
+    });
+    const controller = new AbortController();
+    const revisions: Array<number | undefined> = [];
+    let submissions = 0;
+    let released = false;
+    try {
+      const result = client.run({
+        traceId: `continuation_${mode}`, modelId: "gpt-5.6-sol", reasoning: "max",
+        capabilities: { localToolsEnabled: false, solAvailable: true, proAvailable: true },
+        abortSignal: controller.signal,
+        prepare: async () => ({ text: "original instruction", images: [], release: () => { released = true; } }),
+        onSubmitted: () => { submissions += 1; }, onTextDelta: () => {},
+        prepareThinkingFailureContinuation: async request => {
+          revisions.push(request.revision);
+          if (mode === "abort") controller.abort();
+          if (mode === "continue" && revisions.length === 1) return undefined;
+          return THINKING_FAILURE_CONTINUATION_PROMPT;
+        },
+      });
+      if (mode === "continue") {
+        await expect(result).resolves.toBe("continued answer");
+        expect(revisions).toEqual([7, 8]);
+        expect(submissions).toBe(2);
+      } else {
+        await expect(result).rejects.toThrow(mode === "duplicate" ? "duplicate Thinking failed" : mode === "short" ? "60 minutes" : "abort");
+        expect(revisions).toEqual(mode === "short" ? [] : [7]);
+        expect(submissions).toBe(1);
+      }
+      expect(released).toBeTrue();
+    } finally { await client.close(); }
+  });
+}
 
 test("daemon streams browser lifecycle through the real helper process", async () => {
   const root = mkdtempSync(join(tmpdir(), "codex-launcher-helper-client-"));

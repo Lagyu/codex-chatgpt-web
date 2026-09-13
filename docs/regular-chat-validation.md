@@ -54,7 +54,7 @@ The release assets have these SHA-256 checksums:
 
 ```text
 df0e10677965dacecf0aeb7f8a4ba15d63ef4a2ebdcbfca3d54c08359195db50  codex-web-gpt-5.0.7-pro-context.3-mac-arm64.zip
-96e168c6718ea1c6d061ce23349a68ec02dbbc05c2e7a683af25090a53081  codex-web-gpt-5.0.7-pro-context.3-mac-arm64.dmg
+96e168c6718ea1da1c6d061ce23349a68ec02dbbc05c2e7a683af25090a53081  codex-web-gpt-5.0.7-pro-context.3-mac-arm64.dmg
 ```
 
 The package is ad-hoc signed for local use; macOS notarization was skipped because no notarization

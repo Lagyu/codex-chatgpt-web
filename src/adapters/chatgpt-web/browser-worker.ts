@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { isChatGptWebProModel } from "../../chatgpt-web-models";
 import { PRO_COMPACTION_DISABLED, proContextError } from "./pro-context";
+import { THINKING_FAILURE_SETTLEMENT_MS, ThinkingFailureContinuationGate, type ThinkingFailureContinuationRequest } from "./thinking-failure-continuation";
 import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright-core";
@@ -722,6 +723,8 @@ export interface BrowserTurn {
   capabilities: ChatGptWebCapabilities;
   prepare: () => Promise<CompiledChatGptWebPrompt & { release: () => void }>;
   prepareResume?: () => Promise<CompiledChatGptWebPrompt & { release: () => void }>;
+  /** Returns undefined if earlier tool work raced the settlement fence; never replays a tool. */
+  prepareThinkingFailureContinuation?: (request: ThinkingFailureContinuationRequest) => Promise<string | undefined>;
   /** Select the Codex Native connector without advertising the ordinary turn tool environment. */
   nativeConnector?: boolean;
   retainConversation?: boolean;
@@ -4229,7 +4232,15 @@ export class ChatGptBrowserWorker {
         this.attachFiles(page, prepared)
       ));
       await diagnostics.capture(page, "file-attachment-complete");
-      const completionTracker = new ChatGptCompletionTracker();
+      let completionTracker = new ChatGptCompletionTracker();
+      const thinkingContinuation = new ThinkingFailureContinuationGate();
+      const submissionLifecycle: Pick<BrowserTurn, "onSendActivated" | "onSubmitted"> = {
+        onSendActivated: turn.onSendActivated,
+        onSubmitted: () => {
+          thinkingContinuation.submitted();
+          turn.onSubmitted?.();
+        },
+      };
       const finalSubmissionEvidence = await this.runStage(
         turn.traceId,
         "send",
@@ -4242,7 +4253,7 @@ export class ChatGptBrowserWorker {
           checkpoint => diagnostics.capture(page, checkpoint),
           turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
           turn.externalProgress,
-          turn,
+          submissionLifecycle,
           completionTracker,
           launcherObservationRecovery
             ? async (...args) => {
@@ -4271,15 +4282,17 @@ export class ChatGptBrowserWorker {
           : undefined,
       );
       await diagnostics.capture(page, "send-accepted");
+      const conversationUrl = page.url();
 
       let lastHeartbeat = 0;
       let finalText = "";
       let sawRunning = false;
       let loggedCompletionWait = false;
       let capturedResponse = false;
-      const sentAt = Date.now();
-      const visibleTrace = new ChatGptVisibleTraceTracker();
-      const markdownBuffer = new ChatGptMarkdownBuffer();
+      let sentAt = Date.now();
+      let visibleTrace = new ChatGptVisibleTraceTracker();
+      let markdownBuffer = new ChatGptMarkdownBuffer();
+      let continuedText = "";
       const checkpointStream = turn.captureLunaCheckpoint
         ? new ChatGptLunaCheckpointStream()
         : undefined;
@@ -4301,7 +4314,7 @@ export class ChatGptBrowserWorker {
           retryable: false,
         });
       };
-      const domHealthTracker = new ChatGptTurnDomHealthTracker();
+      let domHealthTracker = new ChatGptTurnDomHealthTracker();
       const responseDomCache: ChatGptResponseDomCache = {};
       let consecutiveObservationRebinds = 0;
       let internalObservationFaults = 0;
@@ -4386,7 +4399,110 @@ export class ChatGptBrowserWorker {
             continue;
           }
         }
-        if (snapshot.thinkingFailedVisible) throw chatGptThinkingFailedError();
+        if (snapshot.thinkingFailedVisible) {
+          // Only this confirmed terminal UI state can add a response inside the existing owner.
+          // Short failures, maintenance, manual turns, staging and compaction remain terminal.
+          const request = !maintenancePage && launcherSurfaceId && turn.conversationKey
+            && turn.prepareThinkingFailureContinuation && !turn.compaction && !prepared.multipart
+            && !turn.captureLunaCheckpoint
+            ? thinkingContinuation.claim(responseTurn.identity) : undefined;
+          if (!request) throw chatGptThinkingFailedError();
+          observedThisIteration = true; // Never retry a continuation mutation as an observation fault.
+          const assertConversation = async (signal?: AbortSignal): Promise<void> => {
+            throwIfPromptAttachmentAborted(signal);
+            if (deadline !== undefined && Date.now() >= deadline) throw new Error("ChatGPT web turn timed out");
+            await assertRegularChatPage(page);
+            if (!new URL(conversationUrl).pathname.startsWith("/c/") || page.url() !== conversationUrl) {
+              throw new Error("The failed response's retained conversation changed; automatic continuation stopped");
+            }
+          };
+          await assertConversation(turn.abortSignal);
+          await diagnostics.capture(page, "thinking-failed-continuation-eligible");
+          console.warn(`[chatgpt-web] browser turn ${turn.traceId} Thinking failed; preparing continuation responseElapsedMs=${Math.round(request.elapsedMs)}`);
+          turn.onCommentary?.("ChatGPT reported Thinking failed after more than 60 minutes. Checking outstanding tools before continuing in the same conversation.");
+          const continuationPrompt = await this.runStage(
+            turn.traceId, "thinking_failure_settlement", THINKING_FAILURE_SETTLEMENT_MS,
+            async stageSignal => {
+              const signal = turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal;
+              for (;;) {
+                await assertConversation(signal);
+                await throwIfChatGptSessionFailureAlert(page);
+                const failed = await this.responseDomSnapshot(responseTurn.locator, {});
+                if (!failed.responsePresent || !failed.thinkingFailedVisible) {
+                  throw new Error("The confirmed Thinking failed response is no longer available");
+                }
+                // These are existing authorized batches, including a batch waiting for its
+                // pre-dispatch DOM boundary. Let each settle once; never resend its tool request.
+                const progress = turn.externalProgress?.snapshot();
+                if (progress && completionTracker.needsToolBatchObservation(progress.lastToolBatchRevision)) {
+                  completionTracker.observeToolBatch(progress.lastToolBatchRevision, failed.visibleText);
+                  await turn.externalProgress!.acknowledgeToolBatch(progress.lastToolBatchRevision);
+                }
+                const running = await page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last().isVisible();
+                if (!running && !chatGptExternalToolCallsAreInFlight(progress)) {
+                  const revision = await withBrowserTurnAbort(turn.completionFence?.begin() ?? Promise.resolve(undefined), signal);
+                  if (!turn.completionFence || revision !== undefined) {
+                    const prompt = await withBrowserTurnAbort(turn.prepareThinkingFailureContinuation!({ ...request, revision }), signal);
+                    if (prompt !== undefined) return prompt;
+                  }
+                }
+                await withBrowserTurnAbort(new Promise<void>(resolveSleep => setTimeout(resolveSleep, 250)), signal);
+              }
+            },
+          );
+          await assertConversation(turn.abortSignal);
+          // Finalize the failed response's already-visible prose before resetting response-local
+          // trackers. The returned answer must remain exactly equal to the append-only stream.
+          try {
+            const observed = markdownBuffer.observe(snapshot.markdownSegments);
+            if (observed) emitMarkdownDelta(observed);
+            const partial = markdownBuffer.finish();
+            if (partial.delta) emitMarkdownDelta(partial.delta);
+            if (partial.markdown) {
+              continuedText += partial.markdown + "\n\n";
+              emitMarkdownDelta("\n\n");
+            }
+          } catch (error) { throwMarkdownConsistencyError(error); }
+          mode = await this.runStage(turn.traceId, "continuation_effort", browserStageTimeouts.effortSelection, () => (
+            this.selectModelAndEffort(page, turn.modelId, requestedMode.effort, browserCapabilities)
+          ));
+          await assertConversation(turn.abortSignal);
+          submissionBaseline = await this.captureSubmissionBaseline(page);
+          await this.runStage(turn.traceId, "continuation_attachment", browserStageTimeouts.promptAttachment, stageSignal => (
+            this.attachPrompt(page, continuationPrompt, mode.localTools,
+              checkpoint => diagnostics.capture(page, `continuation-${checkpoint}`),
+              turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
+              false, undefined, true, mode.thinkEnabled)
+          ));
+          await assertConversation(turn.abortSignal);
+          completionTracker = new ChatGptCompletionTracker();
+          // These batches settled before the continuation. Carry their revision forward without
+          // treating the new response's first text as an answer written before an old tool call.
+          completionTracker.observeToolBatch(turn.externalProgress?.snapshot().lastToolBatchRevision ?? 0, "");
+          const evidence = await this.runStage(turn.traceId, "continuation_send", browserStageTimeouts.send, stageSignal => (
+            this.sendAttachedPrompt(page, submissionBaseline,
+              checkpoint => diagnostics.capture(page, `continuation-${checkpoint}`),
+              turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
+              turn.externalProgress, submissionLifecycle, completionTracker)
+          ));
+          console.info(`[chatgpt-web] browser turn ${turn.traceId} continuation accepted evidence=${evidence}`);
+          responseTurn = await this.waitForNewAssistantTurn(page, submissionBaseline, deadline, turn.abortSignal,
+            turn.externalProgress, CHATGPT_RESPONSE_DOM_GRACE_MS, completionTracker);
+          await diagnostics.capture(page, "thinking-failure-continuation-accepted");
+          markdownBuffer = new ChatGptMarkdownBuffer();
+          visibleTrace = new ChatGptVisibleTraceTracker();
+          domHealthTracker = new ChatGptTurnDomHealthTracker();
+          responseDomCache.key = undefined;
+          responseDomCache.snapshot = undefined;
+          completionFenceRevision = undefined;
+          consecutiveObservationRebinds = 0;
+          internalObservationFaults = 0;
+          sawRunning = false;
+          loggedCompletionWait = false;
+          capturedResponse = false;
+          sentAt = Date.now();
+          continue;
+        }
         if (snapshot.stoppedThinkingVisible) throw chatGptStoppedThinkingError();
         if (snapshot.responsePresent) consecutiveObservationRebinds = 0;
         // The page was read successfully, so the fault budget is genuinely consecutive even when
@@ -4501,7 +4617,7 @@ export class ChatGptBrowserWorker {
               else console.warn(`[chatgpt-web] browser turn ${turn.traceId} completed without a Luna rolling checkpoint; preserving full native history`);
               finalText = completed.answer;
             } else {
-              finalText = final.markdown;
+              finalText = continuedText + final.markdown;
             }
             break;
           }

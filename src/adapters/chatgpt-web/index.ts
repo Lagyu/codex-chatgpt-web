@@ -23,6 +23,7 @@ import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
 import { ChatGptWebAdapterError } from "./adapter-error";
 import { ChatGptBrowserWorker } from "./browser-worker";
+import { assertThinkingFailureContinuationRequest, thinkingFailureContinuationPrompt } from "./thinking-failure-continuation";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
@@ -723,6 +724,11 @@ export function createChatGptWebAdapter(
         ...(retainConversation ? { retainConversation: true, conversationKey } : {}),
         ...(requireRetainedConversation ? { requireRetainedConversation: true } : {}),
         abortSignal: browserAbort.signal,
+        prepareThinkingFailureContinuation: async request => {
+          assertThinkingFailureContinuationRequest(request);
+          browserAbort.signal.throwIfAborted();
+          return thinkingFailureContinuationPrompt();
+        },
         ...(parsed._compactionRequest ? { compaction: true } : {}),
         ...submissionLifecycle,
         ...multipartProgressLifecycle,
@@ -800,6 +806,14 @@ export function createChatGptWebAdapter(
       completionFence: {
         begin: async () => broker.beginCompletionFence(await token.promise),
         commit: async revision => broker.commitCompletionFence(await token.promise, revision),
+      },
+      prepareThinkingFailureContinuation: async request => {
+        assertThinkingFailureContinuationRequest(request);
+        browserAbort.signal.throwIfAborted();
+        if (request.revision === undefined) throw new Error("Tool continuation requires a settled broker revision");
+        const nextToken = await broker.continueResponse(await token.promise, request.revision);
+        browserAbort.signal.throwIfAborted();
+        return nextToken === undefined ? undefined : thinkingFailureContinuationPrompt(nextToken);
       },
       ...(captureLunaCheckpoint ? {
         captureLunaCheckpoint: true,
