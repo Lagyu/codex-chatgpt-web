@@ -21,12 +21,12 @@ log are more useful than another reinstall.
 
 ## Thinking failed and automatic continuation
 
-In `5.0.7-pro-context.5`, an automatic task can continue after a confirmed **Thinking failed** at
+In `5.0.7-pro-context.6`, an automatic task can continue after a confirmed **Thinking failed** at
 any response duration, up to five times per native Codex turn. The delays are 5, 10, 20, 40 and
 60 seconds. Each attempt then allows up to two minutes for outstanding native/MCP work to settle.
 The worker clears a lingering Stop once, only for the verified failed generation, and waits for
-it to disappear. A short instruction asks the model to inspect completed work and running jobs
-before continuing the original task. Tool-result rounds do not reset the five-attempt limit.
+it to disappear. The message is **Please continue.**, plus a line with the fresh token when
+Codex Native tools are enabled. Tool-result rounds do not reset the five-attempt limit.
 
 Each continuation can use another ChatGPT turn. It does not recover hidden reasoning or
 reconstruct history. Harmless query/hash changes and initial conversation-save URL changes are

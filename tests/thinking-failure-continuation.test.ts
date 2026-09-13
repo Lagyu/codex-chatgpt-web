@@ -48,7 +48,7 @@ test("invalid continuation timing and capabilities are rejected and the prompt c
   expect(thinkingFailureContinuationPrompt()).toBe(THINKING_FAILURE_CONTINUATION_PROMPT);
   const prompt = thinkingFailureContinuationPrompt(token);
   expect(prompt).toContain(token);
-  expect(prompt).toContain("previous response's tool handles have been retired");
+  expect(prompt).toContain("Use this new turn_token for Codex Native calls:");
   expect(prompt).not.toContain("codex_context_json");
   expect(() => thinkingFailureContinuationPrompt("arbitrary\ntext")).toThrow();
 });

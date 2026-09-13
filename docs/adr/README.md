@@ -10,8 +10,9 @@
 | [0006: Smoke contention](0006-smoke-contention.md) | Accepted | Bounded waiting before task admission during browser smoke tests |
 | [0007: Long failure continuation](0007-thinking-failure-continuation.md) | Amended by 0008 | Original `.4` duration gate and stable-owner tool capability rotation |
 | [0008: Bounded failure recovery](0008-bounded-failure-recovery.md) | Accepted | Five continuations, document/message continuity, failed-generation settlement and manual resume |
+| [0009: Minimal continuation prompt](0009-minimal-continuation-prompt.md) | Accepted | Brief continuation with only the fresh tool token; existing recovery lifecycle retained |
 
-Records describe the custom `5.0.7-pro-context.1` build and updates through `5.0.7-pro-context.5`, based on upstream commit
+Records describe the custom `5.0.7-pro-context.1` build and updates through `5.0.7-pro-context.6`, based on upstream commit
 `e85e3693fdb4e3e033348c08df0298c20fcdb612`. Changes to these decisions must preserve their history.
 
 The [local build validation receipt](../pro-context-validation.md) records completed experiments,

@@ -10,11 +10,8 @@ export function thinkingFailureRetryDelayMs(attempt: number): number {
   return Math.min(60_000, 5_000 * 2 ** (attempt - 1));
 }
 
-export const THINKING_FAILURE_CONTINUATION_PROMPT =
-  'Your previous response ended with "Thinking failed." Please continue the original task '
-  + 'from this conversation and the current workspace. Check completed work and any running '
-  + 'jobs before taking further actions, so nothing is duplicated. Then continue toward the '
-  + 'original objective with the same freedom to explore deeply.';
+// ADR-0009: the retained conversation already carries the task and its instructions.
+export const THINKING_FAILURE_CONTINUATION_PROMPT = "Please continue.";
 
 export interface ThinkingFailureContinuationRequest {
   responseIdentity: string;
@@ -104,9 +101,5 @@ export async function assertThinkingFailureConversation(
 export function thinkingFailureContinuationPrompt(turnToken?: string): string {
   if (turnToken === undefined) return THINKING_FAILURE_CONTINUATION_PROMPT;
   if (!/^turn_[A-Za-z0-9_-]{24,}$/.test(turnToken)) throw new Error("Invalid continuation tool capability");
-  return `${THINKING_FAILURE_CONTINUATION_PROMPT}\n\n<codex_native_continuation>\n`
-    + "This is a continuation of the same Codex task. Keep its existing instructions and tool contract.\n"
-    + "The previous response's tool handles have been retired. Use this fresh turn_token for all Codex Native calls:\n"
-    + `${turnToken}\n`
-    + "</codex_native_continuation>";
+  return `${THINKING_FAILURE_CONTINUATION_PROMPT}\n\nUse this new turn_token for Codex Native calls: ${turnToken}`;
 }

@@ -45,7 +45,7 @@ without Codex compaction; other efforts retain their existing context lifecycle.
 
 ## Pro retained-context build
 
-This custom build (`5.0.7-pro-context.5`) normally sends one new user message per native Codex turn for
+This custom build (`5.0.7-pro-context.6`) normally sends one new user message per native Codex turn for
 automatic Pro and Zero Risk Pro. The first message includes the task's initial instructions;
 later messages contain only the new input. All local-tool/MCP rounds stay inside that turn's
 single ChatGPT assistant response, except for the failure continuation described below.
@@ -55,7 +55,8 @@ are disabled for Pro, including with Bigger Context on.
 Regular chats are used for automatic and manual tasks, login, and verification. The bridge does
 not toggle personalization. A visible **Thinking failed** status is detected even with its panel
 collapsed. Automatic tasks can receive **up to five continuations per native turn, at any response
-duration**, in the same verified conversation after outstanding tools settle. Retries wait
+duration**, in the same verified conversation after outstanding tools settle. The continuation
+says **Please continue.**, with one fresh-token line for Codex Native tools. Retries wait
 5, 10, 20, 40, then 60 seconds. A lingering Stop is cleared only for the confirmed failed response.
 If the fifth continuation also fails, the settled chat is retained for a manual **Continue** in
 the same Codex task; the normal 30-minute idle expiry and five-tab capacity still apply.

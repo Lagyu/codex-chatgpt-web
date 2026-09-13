@@ -103,3 +103,6 @@ acceptance check, not a reason to infer a ChatGPT-side fix or a cross-task inter
 
 History: `.4` introduced duration-gated recovery; `.5` replaces that gate and repairs recovery
 identity, terminal generation cleanup and verified retention under the operator's new limit.
+On 2026-09-14 the operator reported that recovery works as intended and requested less redundant
+continuation text. [ADR-0009](0009-minimal-continuation-prompt.md) shortens that text in `.6`;
+the recovery lifecycle in this record is unchanged. The `.5` prompt rationale above is historical.
