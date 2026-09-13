@@ -22,8 +22,46 @@ import {
   waitForLauncherManualTerminal,
 } from "../src/launcher-browser-host";
 import type { Browser, BrowserContext, Page } from "playwright-core";
+import { ChatGptBrowserWorker, type BrowserTurn } from "../src/adapters/chatgpt-web/browser-worker";
+import { chatGptThinkingFailedPausedError, chatGptThinkingFailedError } from "../src/adapters/chatgpt-web/adapter-error";
 
 const roots: string[] = [];
+
+test("the worker requests retention only for a verified failure pause while still reporting a failed native turn", async () => {
+  const bodies: any[] = [];
+  const server = createServer(async (request, response) => {
+    let text = "";
+    for await (const chunk of request) text += chunk;
+    const body = JSON.parse(text);
+    bodies.push(body);
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify(body.phase === "start"
+      ? { surfaceId: "launcher_surface_id_0123456789AB", reused: false, connectorBound: false } : {}));
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("no port");
+    const descriptorPath = descriptorFile(`http://127.0.0.1:${address.port}`);
+    for (const [index, failure] of [chatGptThinkingFailedPausedError(), chatGptThinkingFailedError(), new DOMException("cancelled", "AbortError")].entries()) {
+      const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+        config: { browserHost: "launcher", browserHostDescriptorPath: descriptorPath, appName: "Codex Native2" },
+        runBrowserTurn: async () => { throw failure; },
+      });
+      const turn: BrowserTurn = { traceId: `pause_${index}`, modelId: "gpt-5.6-sol", reasoning: "max",
+        conversationKey: "a".repeat(64), retainConversation: true,
+        capabilities: { localToolsEnabled: true, solAvailable: true, proAvailable: true },
+        prepare: async () => ({ text: "test", images: [], release() {} }), onTextDelta() {} };
+      await expect(worker.runExclusive(turn)).rejects.toBe(failure);
+      expect(bodies.at(-1)).toMatchObject({ phase: "end", status: index === 2 ? "aborted" : "failed" });
+      expect(bodies.at(-1).retain).toBe(index === 0 ? true : undefined);
+      expect(bodies.at(-1).connectorBound).toBe(index === 0 ? true : undefined);
+    }
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
 
 test.each(["turn", "inspection"])("%s admission waits for an explicitly busy smoke test without changing request identity", async kind => {
   const bodies: unknown[] = [];

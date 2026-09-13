@@ -143,3 +143,5 @@ On 2026-09-13, the operator authorized [ADR-0007](0007-thinking-failure-continua
 to the one-Web-response constraint: after explicit Thinking failed on a response longer than
 60 minutes, the still-live owner may send a short continuation in the same retained chat. All
 history-replay, restart-tombstone, compaction and staging restrictions above remain in force.
+Later that day, [ADR-0008](0008-bounded-failure-recovery.md) replaced the hour gate with the
+operator's five-continuation limit and added verified manual resumption after exhaustion.

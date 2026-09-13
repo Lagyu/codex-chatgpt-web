@@ -16,7 +16,7 @@ import type { AdapterEvent, CodexParsedRequest, CodexProviderConfig } from "../s
 import { defaultConfig, providerConfig } from "../src/config";
 import { responseRequest } from "../src/server";
 import { expandPreviousResponseInput } from "../src/responses/state";
-import { THINKING_FAILURE_MIN_RESPONSE_MS } from "../src/adapters/chatgpt-web/thinking-failure-continuation";
+import { chatGptThinkingFailedPausedError } from "../src/adapters/chatgpt-web/adapter-error";
 
 const root = mkdtempSync(join(tmpdir(), "cgw-pro-context-"));
 const capabilities = { localToolsEnabled: true, proAvailable: true, solAvailable: true };
@@ -238,7 +238,7 @@ test("long failed Pro response continues through the same native owner without r
       await callTurnBroker(socket, { method: "activity_complete", token, activityId: claim.activityId });
       if (response === 0) {
         const continuation = await turn.prepareThinkingFailureContinuation!({
-          responseIdentity: "long-failed-response", elapsedMs: THINKING_FAILURE_MIN_RESPONSE_MS + 1,
+          responseIdentity: "long-failed-response", elapsedMs: 10_000, attempt: 1,
           revision: await turn.completionFence!.begin(),
         });
         expect(continuation).toBeDefined();
@@ -275,6 +275,55 @@ test("long failed Pro response continues through the same native owner without r
     for (const old of ["INITIAL_SYSTEM_INSTRUCTIONS", "INITIAL_DEVELOPER_INSTRUCTIONS", "NEW_USER_INSTRUCTION", "TOOL_RESULT_NO_REPLAY"]) {
       expect(prompts[1]).not.toContain(old);
     }
+  } finally {
+    worker.run = original;
+    chatGptTurnSessions.clear();
+    await broker.close();
+  }
+}, 20_000);
+
+test("an exhausted Pro failure can resume on a new native instruction with a fresh owner and no history replay", async () => {
+  const config = provider("paused");
+  const broker = TurnBroker.forSocket(config.chatgptWeb!.brokerSocketPath!);
+  const worker = ChatGptBrowserWorker.forProvider(config);
+  const original = worker.run;
+  const prompts: string[] = [];
+  const tokens: string[] = [];
+  let retainedKey: string | undefined;
+  worker.run = async turn => {
+    await turn.onPreparedSelected?.(prompts.length > 0);
+    const prepared = prompts.length ? await turn.prepareResume!() : await turn.prepare();
+    prompts.push(prepared.text);
+    tokens.push(prepared.text.match(/turn_token (turn_[A-Za-z0-9_-]+)/)![1]!);
+    prepared.release();
+    if (prompts.length === 1) {
+      retainedKey = turn.conversationKey;
+      expect(await turn.completionFence!.commit((await turn.completionFence!.begin())!)).toBeTrue();
+      throw chatGptThinkingFailedPausedError();
+    }
+    expect(turn.requireRetainedConversation).toBeTrue();
+    expect(turn.conversationKey).toBe(retainedKey);
+    await expect(callTurnBroker(broker.socketPath, { method: "claim", token: tokens[0] })).rejects.toThrow("has already finished");
+    await expect(callTurnBroker(broker.socketPath, { method: "claim", token: tokens[1] })).resolves.toHaveProperty("bindingId");
+    turn.onTextDelta("Resumed remaining work");
+    return "Resumed remaining work";
+  };
+  try {
+    const first = request("paused-first");
+    const events: AdapterEvent[] = [];
+    await createChatGptWebAdapter(config).runTurn!(first, { headers: new Headers() }, event => events.push(event));
+    detachMockRelease(config, first);
+    expect(events.some(event => event.type === "error")).toBeTrue();
+    const next = request("manual-continue", [user("Continue", "manual-continue")]);
+    const resumed: AdapterEvent[] = [];
+    await createChatGptWebAdapter(config).runTurn!(next, { headers: new Headers() }, event => resumed.push(event));
+    detachMockRelease(config, next);
+    expect(resumed.at(-1)).toMatchObject({ type: "done", endTurn: true });
+    expect(tokens[0]).not.toBe(tokens[1]);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain("Continue");
+    expect(prompts[1]).not.toContain("INITIAL_SYSTEM_INSTRUCTIONS");
+    expect(prompts[1]).not.toContain("NEW_USER_INSTRUCTION");
   } finally {
     worker.run = original;
     chatGptTurnSessions.clear();

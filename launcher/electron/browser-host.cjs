@@ -2343,14 +2343,18 @@ class BrowserHost {
     if (status === "completed") {
       this.logger.info("browser.tab_completed", { tabId: tab.id, traceId });
     }
-    if (status === "completed"
+    // A failed turn may explicitly retain only after the helper has verified and settled a
+    // Thinking failed pause (ADR-0008). It is ready for reuse, while its native turn still fails.
+    if ((status === "completed" || status === "failed")
+      && !cancelledByUser
       && retain
       && tab.conversationKey
       && (!tab.connectorIdentity || connectorBound)) {
+      tab.status = "ready";
       tab.connectorBound = connectorBound === true;
       tab.lastHeartbeatAt = Date.now();
       if (hideAfterTurn && !this.activeTraceId) this.hide();
-      this.logger.info("browser.tab_retained", { tabId: tab.id, traceId });
+      this.logger.info(status === "failed" ? "browser.tab_failed_retained" : "browser.tab_retained", { tabId: tab.id, traceId });
       this.publishState?.(this.snapshot());
       this.writeDescriptor();
       return { cancelledByUser };

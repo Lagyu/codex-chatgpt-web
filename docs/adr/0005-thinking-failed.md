@@ -59,3 +59,5 @@ authorized [ADR-0007](0007-thinking-failure-continuation.md): a confirmed failur
 more than 60 minutes may continue in place. Existing authorized tool batches may settle once
 before that continuation; old capabilities are retired. Ineligible failures still stop with
 `chatgpt_thinking_failed`, and original prompts and tool requests are never replayed.
+Later that day, [ADR-0008](0008-bounded-failure-recovery.md) removed the duration requirement,
+bounded continuations to five, and retained verified, settled failures for manual resumption.

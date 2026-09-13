@@ -496,7 +496,8 @@ export class LauncherBrowserHelperClient {
       else if (message.event === "thinking_continuation") {
         const prepare = pending.turn.prepareThinkingFailureContinuation;
         if (!prepare || pending.turn.compaction || pending.turn.captureLunaCheckpoint
-          || pending.thinkingContinuationInFlight || pending.continuedResponses?.has(message.request.responseIdentity)) {
+          || pending.thinkingContinuationInFlight || pending.continuedResponses?.has(message.request.responseIdentity)
+          || message.request.attempt !== (pending.continuedResponses?.size ?? 0) + 1) {
           this.abortWithLocalFailure(message.id, new Error("Unexpected or duplicate Thinking failed continuation"), pending);
           return;
         }

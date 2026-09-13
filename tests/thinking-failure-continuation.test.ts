@@ -2,38 +2,47 @@ import { expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createContext, runInContext } from "node:vm";
 import { ChatGptBrowserWorker, type BrowserTurn } from "../src/adapters/chatgpt-web/browser-worker";
 import { resolveChatGptWebModelMode } from "../src/adapters/chatgpt-web/model";
 import { ChatGptExternalTurnProgress } from "../src/adapters/chatgpt-web/turn-progress";
 import { callTurnBroker, TurnBroker } from "../src/adapters/chatgpt-web/turn-broker";
 import { defaultBrokerEndpoint } from "../src/config";
 import {
-  THINKING_FAILURE_MIN_RESPONSE_MS as HOUR,
+  THINKING_FAILURE_MAX_CONTINUATIONS,
   THINKING_FAILURE_CONTINUATION_PROMPT,
   ThinkingFailureContinuationGate,
   assertThinkingFailureContinuationRequest,
   thinkingFailureContinuationPrompt,
+  thinkingFailureRetryDelayMs, captureThinkingFailureDocument, assertThinkingFailureConversation,
 } from "../src/adapters/chatgpt-web/thinking-failure-continuation";
 
-test("continuation requires strictly more than 60 minutes since this response was accepted", () => {
+const HOUR = 3_600_000;
+
+test("five unique failures can continue at any duration; accepted responses do not reset the native budget", () => {
   let now = 0;
   const gate = new ThinkingFailureContinuationGate(() => now);
   expect(gate.claim("never-submitted")).toBeUndefined();
+  for (const [index, elapsedMs] of [0, 10_000, HOUR - 1, HOUR, HOUR + 1].entries()) {
+    gate.submitted();
+    now += elapsedMs;
+    expect(gate.claim(`response-${index}`)).toEqual({ responseIdentity: `response-${index}`, elapsedMs, attempt: index + 1 });
+    expect(gate.claim(`response-${index}`)).toBeUndefined();
+  }
   gate.submitted();
-  for (now of [0, HOUR - 1, HOUR]) expect(gate.claim("first")).toBeUndefined();
-  now = HOUR + 1;
-  expect(gate.claim("first")).toEqual({ responseIdentity: "first", elapsedMs: HOUR + 1 });
-  expect(gate.claim("first")).toBeUndefined();
-  gate.submitted();
-  now += 10_000;
-  expect(gate.claim("quick-failure")).toBeUndefined();
-  now += HOUR;
-  expect(gate.claim("next-long-response")?.elapsedMs).toBe(HOUR + 10_000);
+  now += 10 * HOUR;
+  expect(gate.exhausted).toBeTrue();
+  expect(gate.claim("sixth-failure")).toBeUndefined();
+  expect(Array.from({ length: THINKING_FAILURE_MAX_CONTINUATIONS }, (_, i) => thinkingFailureRetryDelayMs(i + 1)))
+    .toEqual([5_000, 10_000, 20_000, 40_000, 60_000]);
 });
 
 test("invalid continuation timing and capabilities are rejected and the prompt contains no replayed context", () => {
-  for (const elapsedMs of [-1, 0, HOUR, NaN, Infinity]) {
-    expect(() => assertThinkingFailureContinuationRequest({ responseIdentity: "current", elapsedMs })).toThrow();
+  for (const elapsedMs of [-1, NaN, Infinity]) {
+    expect(() => assertThinkingFailureContinuationRequest({ responseIdentity: "current", elapsedMs, attempt: 1 })).toThrow();
+  }
+  for (const attempt of [0, -1, 1.5, 6, NaN, Infinity]) {
+    expect(() => assertThinkingFailureContinuationRequest({ responseIdentity: "current", elapsedMs: 0, attempt })).toThrow();
   }
   const token = `turn_${"n".repeat(32)}`;
   expect(thinkingFailureContinuationPrompt()).toBe(THINKING_FAILURE_CONTINUATION_PROMPT);
@@ -42,6 +51,57 @@ test("invalid continuation timing and capabilities are rejected and the prompt c
   expect(prompt).toContain("previous response's tool handles have been retired");
   expect(prompt).not.toContain("codex_context_json");
   expect(() => thinkingFailureContinuationPrompt("arbitrary\ntext")).toThrow();
+});
+
+function conversationDom() {
+  const { createWindow } = require("@mixmark-io/domino");
+  const window = createWindow("<body></body>");
+  const context = createContext({ document: window.document });
+  return {
+    setTurns(count: number) {
+      window.document.body.innerHTML = Array.from({ length: count }, (_, i) => ["user", "response"].map(kind => {
+        const id = `${kind}-${i + 1}`;
+        return `<div data-turn-id-container="${id}"><article data-testid="conversation-turn-${i * 2 + (kind === "user" ? 0 : 1)}"
+          data-turn="${kind === "user" ? "user" : "assistant"}" data-turn-id="${id}"></article></div>`;
+      }).join("")).join("");
+    },
+    evaluate: async (fn: Function, argument: unknown) => {
+      (context as any).__args = argument;
+      return runInContext(`(${fn.toString()})(__args)`, context);
+    },
+    reload() { runInContext("delete globalThis.__CODEX_WEB_GPT_CONTINUATION_DOCUMENT__", context); },
+    document: window.document,
+  };
+}
+
+test("conversation proof accepts URL decoration and save promotion, but rejects replaced documents or messages", async () => {
+  const dom = conversationDom();
+  dom.setTurns(1);
+  let url = "https://chatgpt.com/";
+  const page = { url: () => url, evaluate: dom.evaluate } as any;
+  const nonce = await captureThinkingFailureDocument(page);
+  const check = () => assertThinkingFailureConversation(page, nonce, "response-1", ["user-1", "response-1"]);
+  for (url of ["https://chatgpt.com/", "https://chatgpt.com/c/provisional", "https://chatgpt.com/c/saved?model=pro#details"]) {
+    await expect(check()).resolves.toBeUndefined();
+  }
+  const oldHistory = dom.document.createElement("div");
+  oldHistory.setAttribute("data-turn-id-container", "older-history");
+  oldHistory.innerHTML = '<article data-turn="user" data-testid="conversation-turn-0" data-turn-id="older-history"></article>';
+  dom.document.body.insertBefore(oldHistory, dom.document.body.firstChild);
+  await expect(check()).resolves.toBeUndefined();
+  dom.document.body.appendChild(dom.document.querySelector('[data-turn="assistant"]').cloneNode(true));
+  await expect(check()).rejects.toThrow("conversation messages changed");
+  dom.setTurns(2);
+  await expect(check()).rejects.toThrow("conversation messages changed");
+  dom.setTurns(1);
+  dom.document.querySelector('[data-turn="assistant"]').remove();
+  await expect(check()).rejects.toThrow("no longer current");
+  dom.setTurns(1);
+  dom.reload();
+  await expect(check()).rejects.toThrow("document replaced");
+  for (url of ["https://chatgpt.com/?temporary-chat=true", "https://chatgpt.com/auth/login", "https://other.example/c/saved"]) {
+    await expect(check()).rejects.toThrow();
+  }
 });
 
 test("response capability rotation preserves the owner, settles tools once and rejects old claims and bindings", async () => {
@@ -133,6 +193,15 @@ interface WorkerOptions {
   pendingTool?: boolean;
   settlementNeverCompletes?: boolean;
   genericFailure?: boolean;
+  decoratedUrl?: boolean;
+  lingeringStop?: boolean;
+  stopNeverClears?: boolean;
+  removedFailureMarker?: boolean;
+  lostDocument?: boolean;
+  clearedProse?: boolean;
+  abortDuringBackoff?: boolean;
+  ambiguousStop?: boolean;
+  externallyStopped?: boolean;
 }
 
 async function exerciseWorker(options: WorkerOptions) {
@@ -152,11 +221,26 @@ async function exerciseWorker(options: WorkerOptions) {
   let released = false;
   let pendingRevision: number | undefined;
   let activeResponse = "";
+  let stopped = false;
+  let healthyProjectionRead = false;
+  const dom = conversationDom();
   const absent: any = {
     last() { return this; }, filter() { return this; }, getByText() { return this; }, getByTestId() { return this; },
     isVisible: async () => false,
   };
-  const page = { url: () => url, evaluate: async () => ({}), isClosed: () => false, locator: () => absent };
+  const stop = { ...absent, last() { return this; },
+    isVisible: async () => !!options.lingeringStop && accepted <= options.durations.length
+      && (!stopped || options.stopNeverClears === true),
+    click: async () => {
+      actions.push("stop-failed-generation"); stopped = true;
+      if (options.ambiguousStop) throw new Error("ambiguous stop");
+      if (options.stopNeverClears) stageController.abort();
+    },
+  };
+  const page = { url: () => url,
+    evaluate: async (fn: Function, args: any) => typeof args === "string" || args?.documentNonce
+      ? dom.evaluate(fn, args) : ({}),
+    isClosed: () => false, locator: (selector: string) => selector.includes("stop-button") ? stop : absent };
   const worker = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
     config: { appName: "Codex Native2", browserDiagnosticsPath: root, browserHostDescriptorPath: "owned-descriptor" },
     runStage: async (_trace: string, name: string, _budget: number, action: (signal: AbortSignal) => Promise<unknown>) => {
@@ -164,6 +248,10 @@ async function exerciseWorker(options: WorkerOptions) {
       actions.push(name);
       if (name === "browser_page") return page;
       if (name === options.abortStage) controller.abort();
+      if (name === "thinking_failure_backoff") {
+        if (options.abortDuringBackoff) setTimeout(() => controller.abort(), 10);
+        else if (name !== options.abortStage) return;
+      }
       return action(stageController.signal);
     },
     prepareRegularChatSurface: async () => {},
@@ -176,21 +264,30 @@ async function exerciseWorker(options: WorkerOptions) {
       if (stage === "continuation_send" && options.ambiguousSend) throw new Error("ambiguous submission");
       await args[5]?.onSendActivated?.();
       accepted += 1;
+      stopped = false;
       acceptedAt = now;
       args[5]?.onSubmitted?.();
       return "generation_running";
     },
     waitForNewAssistantTurn: async () => {
       activeResponse = `response-${accepted}`;
-      return { identity: activeResponse, locator: absent, acceptedTurnIdentities: [activeResponse] };
+      dom.setTurns(accepted);
+      return { identity: activeResponse, locator: absent,
+        acceptedTurnIdentities: Array.from({ length: accepted }, (_, i) => [`user-${i + 1}`, `response-${i + 1}`]).flat() };
     },
     responseDomSnapshot: async () => {
-      const failed = accepted <= options.durations.length;
+      const preFailure = options.clearedProse && accepted === 1 && !healthyProjectionRead;
+      healthyProjectionRead = true;
+      const failed = accepted <= options.durations.length && !preFailure;
       now = acceptedAt + (options.durations[accepted - 1] ?? 0);
       if (options.genericFailure && failed) throw new Error("independent connection failure");
       if (options.pendingTool && failed && progress && pendingRevision === undefined) pendingRevision = progress.recordToolBatch(1);
-      const text = failed ? options.partial ? `Progress ${accepted}` : "" : "Done";
-      return { responsePresent: true, thinkingFailedVisible: failed, stoppedThinkingVisible: false,
+      if (failed && options.decoratedUrl) url = "https://chatgpt.com/c/saved-conversation?model=pro#details";
+      if (failed && options.lostDocument) dom.reload();
+      const text = preFailure ? "Prose before failure" : failed ? options.partial ? `Progress ${accepted}` : "" : "Done";
+      const externallyStopped = options.externallyStopped && stage === "thinking_failure_settlement";
+      return { responsePresent: true, thinkingFailedVisible: failed && !(stopped && options.removedFailureMarker) && !externallyStopped,
+        stoppedThinkingVisible: (stopped && options.removedFailureMarker) || externallyStopped,
         visibleText: text, completionActionVisible: !failed, fullHtml: `<p>${text}</p>`, traceBlocks: [],
         markdownSegments: text ? [{ key: `answer-${accepted}`, html: `<p>${text}</p>`, text, streamable: true }] : [] };
     },
@@ -227,7 +324,7 @@ async function exerciseWorker(options: WorkerOptions) {
       prepareThinkingFailureContinuation: async request => {
         assertThinkingFailureContinuationRequest(request);
         actions.push("prepare-continuation");
-        if (options.changedConversation) url = "https://chatgpt.com/c/different-conversation";
+        if (options.changedConversation) { url = "https://chatgpt.com/c/different-conversation"; dom.setTurns(accepted + 1); }
         return THINKING_FAILURE_CONTINUATION_PROMPT;
       },
     };
@@ -252,17 +349,51 @@ test("a long failure continues in place and preserves streamed partial prose acr
   expect(outcome.released).toBeTrue();
 });
 
-for (const duration of [HOUR - 1, HOUR]) test(`a failure at ${duration}ms sends no continuation`, async () => {
+for (const duration of [0, 10_000, HOUR - 1, HOUR]) test(`a failure at ${duration}ms continues automatically`, async () => {
   const result = await exerciseWorker({ durations: [duration] });
-  expect(result.error).toMatchObject({ code: "chatgpt_thinking_failed", retryable: false });
-  expect(result.continuations).toHaveLength(0);
+  expect(result.error).toBeUndefined();
+  expect(result.result).toBe("Done");
+  expect(result.continuations).toHaveLength(1);
 });
 
-test("a quick failure after a long recovered response ends the task without another continuation", async () => {
+test("a quick failure after a long recovered response can continue again", async () => {
   const result = await exerciseWorker({ durations: [HOUR + 1, 10_000] });
-  expect(result.error).toMatchObject({ code: "chatgpt_thinking_failed", retryable: false });
-  expect(result.accepted).toBe(2);
-  expect(result.continuations).toHaveLength(1);
+  expect(result.error).toBeUndefined();
+  expect(result.accepted).toBe(3);
+  expect(result.continuations).toHaveLength(2);
+});
+
+test("five automatic continuations exhaust the native budget and pause the settled sixth failure", async () => {
+  const result = await exerciseWorker({ durations: [0, 1, 2, 3, 4, 5], tools: true, lingeringStop: true, removedFailureMarker: true });
+  expect(result.error).toMatchObject({ code: "chatgpt_thinking_failed_paused", retryable: false });
+  expect(result.accepted).toBe(6);
+  expect(result.continuations).toHaveLength(5);
+  expect(result.actions.filter(action => action === "stop-failed-generation")).toHaveLength(6);
+});
+
+test("the fifth automatic continuation can finish normally without another prompt", async () => {
+  const result = await exerciseWorker({ durations: [1, 2, 3, 4, 5] });
+  expect(result.error).toBeUndefined();
+  expect(result.result).toBe("Done");
+  expect(result.accepted).toBe(6);
+  expect(result.continuations).toHaveLength(5);
+});
+
+test("same-document URL changes and a lingering Stop recover with existing tools settled once", async () => {
+  const result = await exerciseWorker({ durations: [HOUR + 1], decoratedUrl: true, lingeringStop: true,
+    removedFailureMarker: true, tools: true, pendingTool: true });
+  expect(result.error).toBeUndefined();
+  expect(result.result).toBe("Done");
+  expect(result.actions.filter(action => action === "stop-failed-generation")).toHaveLength(1);
+  expect(result.actions.filter(action => action === "acknowledge-existing-batch")).toHaveLength(1);
+  expect(result.actions.indexOf("stop-failed-generation")).toBeLessThan(result.actions.indexOf("prepare-continuation"));
+});
+
+test("a failure panel clearing prior prose preserves the complete native stream", async () => {
+  const result = await exerciseWorker({ durations: [1], clearedProse: true });
+  expect(result.error).toBeUndefined();
+  expect(result.result).toBe("Prose before failure\n\nDone");
+  expect(result.emitted).toBe(result.result!);
 });
 
 for (const options of [{ maintenance: true }, { compaction: true }, { genericFailure: true }]) {
@@ -273,13 +404,16 @@ for (const options of [{ maintenance: true }, { compaction: true }, { genericFai
   });
 }
 
-for (const options of [{ changedConversation: true }, { abortStage: "continuation_effort" },
+for (const options of [{ changedConversation: true }, { lostDocument: true }, { abortStage: "continuation_effort" },
+  { lingeringStop: true, stopNeverClears: true }, { abortStage: "thinking_failure_backoff" },
+  { abortDuringBackoff: true }, { lingeringStop: true, ambiguousStop: true }, { externallyStopped: true },
   { abortStage: "thinking_failure_settlement" }, { tools: true, settlementNeverCompletes: true }]) {
   test(`interrupted or unverified recovery never submits: ${JSON.stringify(options)}`, async () => {
     const result = await exerciseWorker({ durations: [HOUR + 1], ...options });
     expect(result.error).toBeInstanceOf(Error);
     expect(result.accepted).toBe(1);
     expect(result.continuations).toHaveLength(0);
+    if ("ambiguousStop" in options) expect(result.actions.filter(action => action === "stop-failed-generation")).toHaveLength(1);
   });
 }
 

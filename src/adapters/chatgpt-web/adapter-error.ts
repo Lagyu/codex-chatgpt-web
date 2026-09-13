@@ -70,6 +70,16 @@ export function chatGptThinkingFailedError(): ChatGptWebAdapterError {
   );
 }
 
+// Emitted only after the worker verifies the retained document, stops the failed generation,
+// and settles/fences its tools. The native turn fails; its chat remains resumable (ADR-0008).
+export function chatGptThinkingFailedPausedError(): ChatGptWebAdapterError {
+  return new ChatGptWebAdapterError(
+    "ChatGPT reported Thinking failed after all five automatic continuations were used. "
+    + "The chat has been retained. Send Continue in this Codex task to resume while its chat remains available.",
+    { status: 502, errorType: "server_error", code: "chatgpt_thinking_failed_paused", retryable: false },
+  );
+}
+
 export function chatGptRetainedConversationUnavailableError(): ChatGptWebAdapterError {
   return new ChatGptWebAdapterError(
     "The retained ChatGPT conversation is no longer available.",

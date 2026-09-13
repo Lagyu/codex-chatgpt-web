@@ -6,26 +6,29 @@ import { ChatGptCompactionHandoffAccepted, ChatGptWebAdapterError } from "../src
 import { LauncherBrowserHelperClient } from "../src/adapters/chatgpt-web/launcher-helper-client";
 import type { BrowserTurn, ResolvedBrowserConfig } from "../src/adapters/chatgpt-web/browser-worker";
 import { LAUNCHER_BROWSER_HOST_KIND, LAUNCHER_BROWSER_IDLE_URL } from "../src/launcher-browser-host";
-import { THINKING_FAILURE_CONTINUATION_PROMPT, THINKING_FAILURE_MIN_RESPONSE_MS } from "../src/adapters/chatgpt-web/thinking-failure-continuation";
+import { THINKING_FAILURE_CONTINUATION_PROMPT } from "../src/adapters/chatgpt-web/thinking-failure-continuation";
 
 const roots: string[] = [];
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-for (const mode of ["continue", "duplicate", "short", "abort"] as const) {
+for (const mode of ["continue", "duplicate", "invalid", "limit", "out-of-order", "abort", "paused"] as const) {
   test(`Thinking failed continuation crosses the real helper IPC with ${mode} handling`, async () => {
     const root = mkdtempSync(join(tmpdir(), "cgw-helper-continue-"));
     roots.push(root);
     const helper = join(root, "helper.ts");
     writeFileSync(helper, `
       import { ChatGptBrowserWorker } from ${JSON.stringify(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url).href)};
+      import { chatGptThinkingFailedPausedError } from ${JSON.stringify(new URL("../src/adapters/chatgpt-web/adapter-error.ts", import.meta.url).href)};
       ChatGptBrowserWorker.prototype.run = async turn => {
         await turn.onPreparedSelected(false);
         await turn.prepare();
         await turn.onSendActivated();
         turn.onSubmitted();
-        const request = { responseIdentity: "failed-response", elapsedMs: ${THINKING_FAILURE_MIN_RESPONSE_MS + (mode === "short" ? 0 : 1)}, revision: 7 };
+        if (${JSON.stringify(mode)} === "paused") throw chatGptThinkingFailedPausedError();
+        const request = { responseIdentity: "failed-response", elapsedMs: ${mode === "invalid" ? -1 : 0}, revision: 7,
+          attempt: ${mode === "out-of-order" ? 2 : 1} };
         let prompt = await turn.prepareThinkingFailureContinuation(request);
         if (${JSON.stringify(mode)} === "continue") {
           if (prompt !== undefined) throw new Error("Raced broker must be checked again");
@@ -35,6 +38,11 @@ for (const mode of ["continue", "duplicate", "short", "abort"] as const) {
           turn.onSubmitted();
         }
         if (${JSON.stringify(mode)} === "duplicate") await turn.prepareThinkingFailureContinuation(request);
+        if (${JSON.stringify(mode)} === "limit") {
+          for (let attempt = 2; attempt <= 6; attempt++) {
+            await turn.prepareThinkingFailureContinuation({ ...request, responseIdentity: 'failure-' + attempt, attempt });
+          }
+        }
         turn.onTextDelta("continued answer");
         return "continued answer";
       };
@@ -79,9 +87,14 @@ for (const mode of ["continue", "duplicate", "short", "abort"] as const) {
         await expect(result).resolves.toBe("continued answer");
         expect(revisions).toEqual([7, 8]);
         expect(submissions).toBe(2);
+      } else if (mode === "paused") {
+        await expect(result).rejects.toMatchObject({ code: "chatgpt_thinking_failed_paused", status: 502, retryable: false });
+        expect(revisions).toEqual([]);
+        expect(submissions).toBe(1);
       } else {
-        await expect(result).rejects.toThrow(mode === "duplicate" ? "duplicate Thinking failed" : mode === "short" ? "60 minutes" : "abort");
-        expect(revisions).toEqual(mode === "short" ? [] : [7]);
+        await expect(result).rejects.toThrow(["duplicate", "out-of-order"].includes(mode) ? "duplicate Thinking failed"
+          : ["invalid", "limit"].includes(mode) ? "valid attempt" : "abort");
+        expect(revisions).toEqual(["invalid", "out-of-order"].includes(mode) ? [] : mode === "limit" ? [7, 7, 7, 7, 7] : [7]);
         expect(submissions).toBe(1);
       }
       expect(released).toBeTrue();

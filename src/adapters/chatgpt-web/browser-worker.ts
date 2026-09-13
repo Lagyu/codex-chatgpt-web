@@ -1,7 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { isChatGptWebProModel } from "../../chatgpt-web-models";
 import { PRO_COMPACTION_DISABLED, proContextError } from "./pro-context";
-import { THINKING_FAILURE_SETTLEMENT_MS, ThinkingFailureContinuationGate, type ThinkingFailureContinuationRequest } from "./thinking-failure-continuation";
+import { setTimeout as delay } from "node:timers/promises";
+import {
+  THINKING_FAILURE_SETTLEMENT_MS, THINKING_FAILURE_MAX_CONTINUATIONS, ThinkingFailureContinuationGate,
+  assertThinkingFailureConversation, captureThinkingFailureDocument, thinkingFailureRetryDelayMs,
+  type ThinkingFailureContinuationRequest,
+} from "./thinking-failure-continuation";
 import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright-core";
@@ -85,6 +90,7 @@ import {
   chatGptRetainedConversationUnavailableError,
   chatGptStoppedThinkingError,
   chatGptThinkingFailedError,
+  chatGptThinkingFailedPausedError,
 } from "./adapter-error";
 import {
   ChatGptLunaCheckpointStream,
@@ -3730,6 +3736,7 @@ export class ChatGptBrowserWorker {
     let terminal: "completed" | "failed" | "aborted" = "completed";
     let terminalMessage: string | undefined;
     let originalError: unknown;
+    let retainFailedConversation = false;
     let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
     let heartbeatInFlight = false;
     let lastHeartbeatFailureAt = 0;
@@ -3765,6 +3772,8 @@ export class ChatGptBrowserWorker {
       return await this.runBrowserTurn(turn, surfaceId, undefined, reused);
     } catch (error) {
       originalError = error;
+      retainFailedConversation = error instanceof ChatGptWebAdapterError
+        && error.code === "chatgpt_thinking_failed_paused" && !turn.abortSignal?.aborted;
       terminal = error instanceof ChatGptCompactionHandoffAccepted
         ? "completed"
         : (error instanceof DOMException && error.name === "AbortError")
@@ -3782,8 +3791,8 @@ export class ChatGptBrowserWorker {
           helperPid: process.pid,
           status: terminal,
           ...(terminalMessage ? { message: terminalMessage } : {}),
-          ...(terminal === "completed" && turn.retainConversation ? { retain: true } : {}),
-          ...(terminal === "completed" && (turn.nativeConnector || turn.capabilities.localToolsEnabled)
+          ...((terminal === "completed" || retainFailedConversation) && turn.retainConversation ? { retain: true } : {}),
+          ...((terminal === "completed" || retainFailedConversation) && (turn.nativeConnector || turn.capabilities.localToolsEnabled)
             ? { connectorBound: true }
             : {}),
         });
@@ -4282,7 +4291,12 @@ export class ChatGptBrowserWorker {
           : undefined,
       );
       await diagnostics.capture(page, "send-accepted");
-      const conversationUrl = page.url();
+      const canContinueThinkingFailure = !maintenancePage && !!launcherSurfaceId && !!turn.conversationKey
+        && !!turn.prepareThinkingFailureContinuation && !turn.compaction && !prepared.multipart
+        && !turn.captureLunaCheckpoint;
+      const continuationDocument = canContinueThinkingFailure
+        ? await withChatGptBrowserObservationTimeout(withBrowserTurnAbort(captureThinkingFailureDocument(page), turn.abortSignal))
+        : undefined;
 
       let lastHeartbeat = 0;
       let finalText = "";
@@ -4401,35 +4415,50 @@ export class ChatGptBrowserWorker {
         }
         if (snapshot.thinkingFailedVisible) {
           // Only this confirmed terminal UI state can add a response inside the existing owner.
-          // Short failures, maintenance, manual turns, staging and compaction remain terminal.
-          const request = !maintenancePage && launcherSurfaceId && turn.conversationKey
-            && turn.prepareThinkingFailureContinuation && !turn.compaction && !prepared.multipart
-            && !turn.captureLunaCheckpoint
-            ? thinkingContinuation.claim(responseTurn.identity) : undefined;
-          if (!request) throw chatGptThinkingFailedError();
+          // Maintenance, manual turns, staging and compaction remain terminal (ADR-0008).
+          if (!canContinueThinkingFailure || !continuationDocument) throw chatGptThinkingFailedError();
+          const request = thinkingContinuation.claim(responseTurn.identity);
+          if (!request && !thinkingContinuation.exhausted) throw chatGptThinkingFailedError();
           observedThisIteration = true; // Never retry a continuation mutation as an observation fault.
           const assertConversation = async (signal?: AbortSignal): Promise<void> => {
             throwIfPromptAttachmentAborted(signal);
             if (deadline !== undefined && Date.now() >= deadline) throw new Error("ChatGPT web turn timed out");
-            await assertRegularChatPage(page);
-            if (!new URL(conversationUrl).pathname.startsWith("/c/") || page.url() !== conversationUrl) {
-              throw new Error("The failed response's retained conversation changed; automatic continuation stopped");
-            }
+            await withChatGptBrowserObservationTimeout(withBrowserTurnAbort(
+              assertThinkingFailureConversation(page, continuationDocument, responseTurn.identity, responseTurn.acceptedTurnIdentities), signal,
+            ));
           };
           await assertConversation(turn.abortSignal);
           await diagnostics.capture(page, "thinking-failed-continuation-eligible");
-          console.warn(`[chatgpt-web] browser turn ${turn.traceId} Thinking failed; preparing continuation responseElapsedMs=${Math.round(request.elapsedMs)}`);
-          turn.onCommentary?.("ChatGPT reported Thinking failed after more than 60 minutes. Checking outstanding tools before continuing in the same conversation.");
+          console.warn(`[chatgpt-web] browser turn ${turn.traceId} Thinking failed; ${request
+            ? `preparing continuation attempt=${request.attempt}/${THINKING_FAILURE_MAX_CONTINUATIONS} responseElapsedMs=${Math.round(request.elapsedMs)}`
+            : "continuation budget exhausted; settling chat for manual resume"}`);
+          turn.onCommentary?.(request
+            ? `ChatGPT reported Thinking failed. Checking outstanding tools before automatic continuation ${request.attempt} of ${THINKING_FAILURE_MAX_CONTINUATIONS} in the same conversation.`
+            : "ChatGPT reported Thinking failed again. The five automatic continuations have been used; settling the chat for manual resume.");
+          if (request) {
+            const backoffMs = thinkingFailureRetryDelayMs(request.attempt);
+            await this.runStage(turn.traceId, "thinking_failure_backoff", backoffMs + 5_000, async stageSignal => {
+              const signal = turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal;
+              await assertConversation(signal);
+              await delay(backoffMs, undefined, { signal });
+              await assertConversation(signal);
+            });
+          }
           const continuationPrompt = await this.runStage(
             turn.traceId, "thinking_failure_settlement", THINKING_FAILURE_SETTLEMENT_MS,
             async stageSignal => {
               const signal = turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal;
+              let stoppedFailedGeneration = false;
               for (;;) {
                 await assertConversation(signal);
                 await throwIfChatGptSessionFailureAlert(page);
                 const failed = await this.responseDomSnapshot(responseTurn.locator, {});
-                if (!failed.responsePresent || !failed.thinkingFailedVisible) {
+                if (!failed.responsePresent) {
                   throw new Error("The confirmed Thinking failed response is no longer available");
+                }
+                if (!failed.thinkingFailedVisible && !stoppedFailedGeneration) {
+                  if (failed.stoppedThinkingVisible) throw chatGptStoppedThinkingError();
+                  throw new Error("The confirmed Thinking failed status changed before recovery");
                 }
                 // These are existing authorized batches, including a batch waiting for its
                 // pre-dispatch DOM boundary. Let each settle once; never resend its tool request.
@@ -4438,15 +4467,35 @@ export class ChatGptBrowserWorker {
                   completionTracker.observeToolBatch(progress.lastToolBatchRevision, failed.visibleText);
                   await turn.externalProgress!.acknowledgeToolBatch(progress.lastToolBatchRevision);
                 }
-                const running = await page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last().isVisible();
+                const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
+                const running = await stop.isVisible();
+                if (running && !stoppedFailedGeneration) {
+                  if (!failed.thinkingFailedVisible) throw new Error("The failed generation changed before it could be stopped");
+                  await assertConversation(signal);
+                  // ChatGPT can leave Stop rendered after a terminal failure. Stop only that
+                  // verified generation, once; never retry an ambiguous mutation.
+                  stoppedFailedGeneration = true;
+                  await withBrowserTurnAbort(stop.click({ timeout: 10_000 }), signal);
+                  await diagnostics.capture(page, "thinking-failed-generation-stopped");
+                  continue;
+                }
                 if (!running && !chatGptExternalToolCallsAreInFlight(progress)) {
                   const revision = await withBrowserTurnAbort(turn.completionFence?.begin() ?? Promise.resolve(undefined), signal);
                   if (!turn.completionFence || revision !== undefined) {
-                    const prompt = await withBrowserTurnAbort(turn.prepareThinkingFailureContinuation!({ ...request, revision }), signal);
-                    if (prompt !== undefined) return prompt;
+                    await assertConversation(signal);
+                    if (!request) {
+                      // Fence the exhausted owner's tools before offering manual resumption.
+                      if (!turn.completionFence || await withBrowserTurnAbort(turn.completionFence.commit(revision!), signal)) {
+                        await assertConversation(signal);
+                        throw turn.retainConversation ? chatGptThinkingFailedPausedError() : chatGptThinkingFailedError();
+                      }
+                    } else {
+                      const prompt = await withBrowserTurnAbort(turn.prepareThinkingFailureContinuation!({ ...request, revision }), signal);
+                      if (prompt !== undefined) return prompt;
+                    }
                   }
                 }
-                await withBrowserTurnAbort(new Promise<void>(resolveSleep => setTimeout(resolveSleep, 250)), signal);
+                await delay(250, undefined, { signal });
               }
             },
           );
@@ -4454,7 +4503,9 @@ export class ChatGptBrowserWorker {
           // Finalize the failed response's already-visible prose before resetting response-local
           // trackers. The returned answer must remain exactly equal to the append-only stream.
           try {
-            const observed = markdownBuffer.observe(snapshot.markdownSegments);
+            // The terminal error UI can remove the prior prose after it was streamed. Finish
+            // the last valid projection instead of retracting already delivered text.
+            const observed = snapshot.markdownSegments.length ? markdownBuffer.observe(snapshot.markdownSegments) : "";
             if (observed) emitMarkdownDelta(observed);
             const partial = markdownBuffer.finish();
             if (partial.delta) emitMarkdownDelta(partial.delta);

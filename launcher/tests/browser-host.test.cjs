@@ -2535,6 +2535,53 @@ test("a retained browser tab expires at thirty minutes", () => {
   assert.equal(fixture.turnTabs.size, 0);
 });
 
+test("an explicitly settled failure retains its chat for the next exact native task owner", async () => {
+  const logs = [];
+  const tab = {
+    id: "tab-paused", surfaceId: "surface-paused", traceId: "trace_failed", helperPid: 777,
+    interactionMode: "automatic", conversationKey: "a".repeat(64), connectorIdentity: "Codex Native2",
+    connectorBound: true, status: "running", loading: true,
+    view: { webContents: { isDestroyed: () => false, setBackgroundThrottling() {} } },
+  };
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    turnTabs: new Map([[tab.id, tab]]), closedTurnOwners: new Map(), userCancelledTurnOwners: new Map(),
+    syncViewVisibility() {}, writeDescriptor() {}, publishState() {}, snapshot: () => ({ tabs: [] }), hide() {},
+    logger: { info: (event) => logs.push(event) },
+  });
+  await fixture.endTurn(tab.traceId, 777, "failed", true, "Five continuations used; send Continue", true, true);
+  assert.equal(tab.status, "ready");
+  assert.match(tab.message, /Five continuations/);
+  assert.equal(fixture.turnTabs.get(tab.id), tab);
+  assert.ok(logs.includes("browser.tab_failed_retained"));
+  assert.ok(!logs.includes("browser.tab_completed"));
+  for (const [key, connector] of [["b".repeat(64), "Codex Native2"], [tab.conversationKey, "different connector"]]) {
+    await assert.rejects(fixture.beginTurn("new-owner", false, 888, key, connector, true), /no longer available/);
+  }
+  const resumed = await fixture.beginTurn("new-owner", false, 888, tab.conversationKey, tab.connectorIdentity, true);
+  assert.deepEqual(resumed, { surfaceId: tab.surfaceId, tabId: tab.id, reused: true, connectorBound: true });
+  assert.equal(tab.status, "running");
+  assert.equal(tab.traceId, "new-owner");
+  assert.equal(tab.helperPid, 888);
+});
+
+test("cancelled or unbound failed turns cannot retain a chat even when requested", async () => {
+  for (const kind of ["cancelled", "unbound", "aborted"]) {
+    const removed = [];
+    const tab = {
+      id: "unsafe-pause", traceId: "unsafe_trace", helperPid: 777, conversationKey: "a".repeat(64),
+      connectorIdentity: "Codex Native2", status: "running",
+      view: { webContents: { isDestroyed: () => false, setBackgroundThrottling() {} } },
+    };
+    const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+      turnTabs: new Map([[tab.id, tab]]), closedTurnOwners: new Map(),
+      userCancelledTurnOwners: new Map(kind === "cancelled" ? [[tab.traceId, 777]] : []),
+      logger: { info() {} }, removeTurnTab: candidate => removed.push(candidate.id), hide() {},
+    });
+    await fixture.endTurn(tab.traceId, 777, kind === "aborted" ? "aborted" : "failed", false, "Stopped", true, kind !== "unbound");
+    assert.deepEqual(removed, [tab.id]);
+  }
+});
+
 test("a completed connector turn without binding is released instead of retained", async () => {
   let closed = false;
   const tab = {

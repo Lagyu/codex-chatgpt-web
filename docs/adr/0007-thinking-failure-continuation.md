@@ -1,6 +1,10 @@
 # ADR-0007: Continue a failed response only after more than 60 minutes
 
-Date: 2026-09-13. Status: Accepted. Build: `5.0.7-pro-context.4`.
+Date: 2026-09-13. Status: Amended by [ADR-0008](0008-bounded-failure-recovery.md). Build: `5.0.7-pro-context.4`.
+
+The original `.4` decision is preserved below. In `.5` the operator removed the duration gate and
+authorized five automatic continuations per native turn. ADR-0008 also replaces the full-URL
+guard and handles lingering generation controls and verified failure retention.
 
 ## Context and authorization
 
